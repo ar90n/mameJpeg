@@ -55,9 +55,9 @@ typedef enum
 
 typedef struct {
     union {
-        mameJpeg_input_byte_callback_ptr input_callback;
-        mameJpeg_output_byte_callback_ptr output_callback;
-    };
+        mameJpeg_input_byte_callback_ptr input;
+        mameJpeg_output_byte_callback_ptr output;
+    } callback;
     void* callback_param;
     uint16_t cache;
     int cache_use_bits;
@@ -69,7 +69,7 @@ bool mameBitstream_input_initialize( mameBitstream_context* context, mameJpeg_in
     MAMEJPEG_NULL_CHECK( context );
     MAMEJPEG_NULL_CHECK( callback );
 
-    context->input_callback = callback;
+    context->callback.input = callback;
     context->callback_param = callback_param;
     context->cache = 0x0000;
     context->cache_use_bits = 0;
@@ -83,7 +83,7 @@ bool mameBitstream_output_initialize( mameBitstream_context* context, mameJpeg_o
     MAMEJPEG_NULL_CHECK( context );
     MAMEJPEG_NULL_CHECK( callback );
 
-    context->output_callback = callback;
+    context->callback.output = callback;
     context->callback_param = callback_param;
     context->cache = 0x0000;
     context->cache_use_bits = 0;
@@ -100,7 +100,7 @@ bool mameBitstream_tryReadIntoCache( mameBitstream_context* context )
     //( ( 8 * sizeof( context->cache ) ) - context->cache_use_bits < 8
 
     uint8_t tmp;
-    MAMEJPEG_CHECK( context->input_callback( context->callback_param, &tmp ) );
+    MAMEJPEG_CHECK( context->callback.input( context->callback_param, &tmp ) );
     context->cache |= ( tmp << context->cache_use_bits );
     context->cache_use_bits += 8;
 
@@ -114,7 +114,7 @@ bool mameBitstream_tryWriteFromCache( mameBitstream_context* context )
     MAMEJPEG_CHECK( 8 <= context->cache_use_bits )
 
     uint8_t tmp = (uint8_t)( context->cache & 0xff );
-    MAMEJPEG_CHECK( context->output_callback( context->callback_param, tmp ) );
+    MAMEJPEG_CHECK( context->callback.output( context->callback_param, tmp ) );
 
     context->cache >>= 8;
     context->cache_use_bits -= 8;
@@ -178,7 +178,6 @@ ON_ERROR:
     return ( bits == 0 );
 }
 
-#if 0
 typedef enum {
     MAMEJPEG_ENCODE = 0,
     MAMEJPEG_DECODE = 1,
@@ -197,15 +196,15 @@ typedef enum{
 typedef struct {
     uint8_t* work_buffer;
     size_t work_buffer_length;
-    mameBitstream_input_context input_stream[1];
-    mameBitstream_output_context output_stream[1];
+    mameBitstream_context input_stream[1];
+    mameBitstream_context output_stream[1];
     mameJpeg_mode mode;
     int progress;
 } mameJpeg_context;
 
 bool mameJpeg_getImageSize( void* input, int* width, int* height )
 {
-    width = height = 100;
+    *width = *height = 100;
     return true;
 }
 
@@ -222,36 +221,30 @@ bool mameJpeg_getProgress( mameJpeg_context* context, int* progress )
 }
 
 bool mameJpeg_initialize( mameJpeg_context* context,
+                          mameJpeg_input_byte_callback_ptr input_callback,
+                          void* input_callback_param,
+                          mameJpeg_output_byte_callback_ptr output_callback,
+                          void* output_callback_param,
                           void* work_buffer,
                           size_t work_buffer_length,
-                          void* input_ptr,
-                          size_t input_size,
-                          void* output_ptr,
-                          size_t output_size,
                           mameJpeg_mode mode )
 {
     MAMEJPEG_NULL_CHECK( context )
+    MAMEJPEG_NULL_CHECK( input_callback )
+    MAMEJPEG_NULL_CHECK( output_callback )
     MAMEJPEG_NULL_CHECK( work_buffer )
     MAMEJPEG_CHECK( 0 < work_buffer_length )
-    MAMEJPEG_NULL_CHECK( input_ptr )
-    MAMEJPEG_CHECK( input_size )
-    MAMEJPEG_NULL_CHECK( output_ptr )
-    MAMEJPEG_CHECK( output_size )
     MAMEJPEG_CHECK( mode == MAMEJPEG_ENCODE || mode == MAMEJPEG_DECODE )
 
+    mameBitstream_input_initialize( context->input_stream, input_callback, input_callback_param );
+    mameBitstream_output_initialize( context->output_stream, output_callback, output_callback_param );
     context->work_buffer = (uint8_t*)work_buffer;
     context->work_buffer_length = work_buffer_length;
-
     context->mode = mode;
-    context->io_ptr =  ( mode == MAMEJPEG_ENCODE ) ? input_ptr : output_ptr;
-    context->io_size = ( mode == MAMEJPEG_ENCODE ) ? input_size : output_size;
-    mameBitstream_initialize( context->io_stream,
-                              ( mode == MAMEJPEG_ENCODE ) ? output_ptr : input_ptr,
-                              ( mode == MAMEJPEG_ENCODE ) ? output_ptr : input_ptr );
-
     return true;
 }
 
+#if 0
 bool mameJpeg_getNextMarker( mameJpeg_context* context, mameJpeg_marker* marker )
 {
     uint8_t prefix;
