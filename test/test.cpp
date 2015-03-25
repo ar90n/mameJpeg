@@ -4,17 +4,13 @@
 #include "catch.hpp"
 
 #include "../mameJpeg.h"
-
-int f()
-{
-    return 2;
-}
  
 TEST_CASE("Bitsteram read test", "[sample]")
 {
     uint8_t buffer[9] = { 0xfa, 0xab, 0x32, 0xb3, 0xf8, 0xc3, 0xaa, 0xaa, 0xbb };
+    mameJpeg_memory_callback_param param = { buffer, 0, sizeof( buffer ) / sizeof( uint8_t ) };
     mameBitstream_context bitstream[1];
-    mameBitstream_initialize( bitstream, buffer, sizeof( buffer ) / sizeof( uint8_t )  );
+    mameBitstream_input_initialize( bitstream, mameJpeg_input_from_memory_callback, &param  );
 
     uint8_t data8 = 0;
     CHECK( mameBitstream_readBits(bitstream, &data8, 1, 1 ) );
@@ -52,10 +48,10 @@ TEST_CASE("Bitsteram read test", "[sample]")
 
 TEST_CASE("Bitsteram write test", "[sample]")
 {
-    //uint8_t buffer[9] = { 0xfa, 0xab, 0x32, 0xb3, 0xf8, 0xc3, 0xaa, 0xaa, 0xbb };
     uint8_t buffer[9];
     mameBitstream_context bitstream[1];
-    mameBitstream_initialize( bitstream, buffer, sizeof( buffer ) / sizeof( uint8_t )  );
+    mameJpeg_memory_callback_param param = { buffer, 0, sizeof( buffer ) / sizeof( uint8_t ) };
+    mameBitstream_output_initialize( bitstream, mameJpeg_output_to_memory_callback, &param  );
 
     uint8_t data8 = 0x00;
     CHECK( mameBitstream_writeBits(bitstream, &data8, 1 ) );
@@ -85,6 +81,6 @@ TEST_CASE("Bitsteram write test", "[sample]")
     data16 = 0xbbaa;
     CHECK( mameBitstream_writeBits(bitstream, &data16, 16 ) );
 
-    int res = memcmp( buffer, "\xf\xa\xa\xb\x3\x2\xb\x3\xf\x8\xc\x3\xa\xa\xa\xa\xb\xb", sizeof( buffer ) / sizeof( uint8_t ) );
+    int res = memcmp( buffer, "\xfa\xab\x32\xb3\xf8\xc3\xaa\xaa\xbb", sizeof( buffer ) / sizeof( uint8_t ) );
     CHECK( res == 0 );
 }

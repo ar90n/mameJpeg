@@ -7,99 +7,137 @@ extern "C" {
 
 #include <ctype.h>
 
-#define MAMEJPEG_CHECK_PARAM( X ) do{if((X)==false )return false;}while(0);
-#define MAMEJPEG_NULL_CHECK_PARAM( X )  MAMEJPEG_CHECK((X)!=NULL)
-#define MAMEJPEG_CHECK_PROC( LABEL, X ) do{ if( (X) == false ) goto LABEL; } while(0);
+#define MAMEJPEG_CHECK( X ) do{if((X)==false )return false;}while(0);
+#define MAMEJPEG_NULL_CHECK( X )  MAMEJPEG_CHECK((X)!=NULL)
+#define MAMEJPEG_PROC_CHECK( LABEL, X ) do{ if( (X) == false ) goto LABEL; } while(0);
 
-typedef bool (*)( void* param, uint8_t* byte ) mameJpeg_input_byte_callback_ptr;
-typedef bool (*)( void* param, uint8_t byte ) mameJpeg_output_byte_callback_ptr;
+typedef bool (*mameJpeg_input_byte_callback_ptr)( void* param, uint8_t* byte );
+typedef bool (*mameJpeg_output_byte_callback_ptr)( void* param, uint8_t byte );
 
 typedef struct {
-    mameJpeg_input_byte_callback_ptr callback;
+    void* buffer_ptr;
+    size_t buffer_pos;
+    size_t buffer_length;
+} mameJpeg_memory_callback_param;
+
+bool mameJpeg_input_from_memory_callback( void* param, uint8_t* byte )
+{
+    MAMEJPEG_NULL_CHECK( param )
+    MAMEJPEG_NULL_CHECK( byte )
+
+    mameJpeg_memory_callback_param *callback_param = (mameJpeg_memory_callback_param*)param;
+    MAMEJPEG_CHECK( callback_param->buffer_pos < callback_param->buffer_length )
+
+    *byte = ((uint8_t*)callback_param->buffer_ptr)[ callback_param->buffer_pos ];
+    callback_param->buffer_pos++;
+
+    return true;
+}
+
+bool mameJpeg_output_to_memory_callback( void* param, uint8_t byte )
+{
+    MAMEJPEG_NULL_CHECK( param )
+
+    mameJpeg_memory_callback_param *callback_param = (mameJpeg_memory_callback_param*)param;
+    MAMEJPEG_CHECK( callback_param->buffer_pos < callback_param->buffer_length )
+
+    ((uint8_t*)callback_param->buffer_ptr)[ callback_param->buffer_pos ] = byte;
+    (( mameJpeg_memory_callback_param* )param)->buffer_pos++;
+
+    return true;
+}
+
+typedef enum
+{
+    MAMEBITSTREAM_INPUT,
+    MAMEBITSTREAM_OUTPUT,
+} mameBitstream_mode;
+
+typedef struct {
+    union {
+        mameJpeg_input_byte_callback_ptr input_callback;
+        mameJpeg_output_byte_callback_ptr output_callback;
+    };
     void* callback_param;
     uint16_t cache;
     int cache_use_bits;
-} mameBitstream_input_context;
+    mameBitstream_mode mode;
+} mameBitstream_context;
 
-typedef struct {
-    mameJpeg_output_byte_callback_ptr callback;
-    void* callback_param;
-    uint16_t cache;
-    int cache_use_bits;
-} mameBitstream_output_context;
-
-
-bool mameBitstream_input_initialize( mameBitstream_input_context* context, mameJpeg_read_byte_callback_ptr callback, void* callback_param )
+bool mameBitstream_input_initialize( mameBitstream_context* context, mameJpeg_input_byte_callback_ptr callback, void* callback_param )
 {
     MAMEJPEG_NULL_CHECK( context );
     MAMEJPEG_NULL_CHECK( callback );
 
-    context->callback = callback;
-    context-callback_param = callback_param;
+    context->input_callback = callback;
+    context->callback_param = callback_param;
     context->cache = 0x0000;
     context->cache_use_bits = 0;
+    context->mode = MAMEBITSTREAM_INPUT;
 
     return true;
 }
 
-bool mameBitstream_output_initialize( mameBitstream_input_context* context, mameJpeg_write_byte_callback_ptr callback, void* callback_param )
+bool mameBitstream_output_initialize( mameBitstream_context* context, mameJpeg_output_byte_callback_ptr callback, void* callback_param )
 {
     MAMEJPEG_NULL_CHECK( context );
     MAMEJPEG_NULL_CHECK( callback );
 
-    context->callback = callback;
-    context-callback_param = callback_param;
+    context->output_callback = callback;
+    context->callback_param = callback_param;
     context->cache = 0x0000;
     context->cache_use_bits = 0;
+    context->mode = MAMEBITSTREAM_OUTPUT;
 
     return true;
 }
 
-bool mameBitstream_tryReadIntoCache( mameBitstream_input_context* context )
-{
-    MAMEJPEG_NULL_CHECK_PARAM( context )
-    MAMEJPEG_CHECK_PARAM( context->cache_use_bits < 8 )
-
-    uint8_t tmp;
-    MAMEJPEG_CHECK_PARAM( context->callback( context->callback_param, &tmp ) );
-
-    context->cache |= ( tmp << context->cache_use_bits );
-    context->cache_use_bits += 8;
-    context->pos++;
-
-    return true;
-}
-
-bool mameBitstream_writeByte( mameBitstream_output_context* context )
+bool mameBitstream_tryReadIntoCache( mameBitstream_context* context )
 {
     MAMEJPEG_NULL_CHECK( context )
+    MAMEJPEG_CHECK( context->mode == MAMEBITSTREAM_INPUT )
+    MAMEJPEG_CHECK( context->cache_use_bits < 8 )
+    //( ( 8 * sizeof( context->cache ) ) - context->cache_use_bits < 8
+
+    uint8_t tmp;
+    MAMEJPEG_CHECK( context->input_callback( context->callback_param, &tmp ) );
+    context->cache |= ( tmp << context->cache_use_bits );
+    context->cache_use_bits += 8;
+
+    return true;
+}
+
+bool mameBitstream_tryWriteFromCache( mameBitstream_context* context )
+{
+    MAMEJPEG_NULL_CHECK( context )
+    MAMEJPEG_CHECK( context->mode == MAMEBITSTREAM_OUTPUT )
     MAMEJPEG_CHECK( 8 <= context->cache_use_bits )
 
     uint8_t tmp = (uint8_t)( context->cache & 0xff );
-    MAMEJPEG_CHECK_PROC( context->callback( context->callback_param, tmp ) );
+    MAMEJPEG_CHECK( context->output_callback( context->callback_param, tmp ) );
 
     context->cache >>= 8;
     context->cache_use_bits -= 8;
-    context->pos++;
 
     return true;
 }
 
-bool mameBitstream_readBits( mameBitstream_input_context* context, void* buffer, int buffer_length, int bits )
+bool mameBitstream_readBits( mameBitstream_context* context, void* buffer, int buffer_length, int bits )
 {
-    MAMEJPEG_NULL_CHECK_PARAM( context )
-    MAMEJPEG_NULL_CHECK_PARAM( buffer )
-    MAMEJPEG_CHECK_PARAM( bits <= ( 8 * buffer_length ) )
+    MAMEJPEG_NULL_CHECK( context )
+    MAMEJPEG_CHECK( context->mode == MAMEBITSTREAM_INPUT )
+    MAMEJPEG_NULL_CHECK( buffer )
+    MAMEJPEG_CHECK( bits <= ( 8 * buffer_length ) )
 
     int buffer_pos = 0;
     while( 0 < bits )
     {
-        if( context->cache_use_bits < bit && context->cache_use_bits < 8 )
+        int read_bits = ( 8 < bits ) ? 8 : bits;
+        if( context->cache_use_bits < read_bits )
         {
-            MAMEJPEG_CHECK_PROC( ON_ERROR,  mameBitstream_tryReadIntoCache( context ) );
+            MAMEJPEG_PROC_CHECK( ON_ERROR,  mameBitstream_tryReadIntoCache( context ) );
         }
 
-        int read_bits = ( 8 < bits ) ? 8 : bits;
         uint8_t cache_mask = ( 1 << read_bits ) - 1;
         ((uint8_t*)buffer)[ buffer_pos ] = context->cache & cache_mask;
         buffer_pos++;
@@ -116,6 +154,7 @@ ON_ERROR:
 bool mameBitstream_writeBits( mameBitstream_context* context, void* buffer, int bits )
 {
     MAMEJPEG_NULL_CHECK( context )
+    MAMEJPEG_CHECK( context->mode == MAMEBITSTREAM_OUTPUT )
     MAMEJPEG_NULL_CHECK( buffer )
 
     int buffer_pos = 0;
@@ -131,7 +170,7 @@ bool mameBitstream_writeBits( mameBitstream_context* context, void* buffer, int 
 
         if( 8 <= context->cache_use_bits )
         {
-            MAMEJPEG_CHECK_PROC( ON_ERROR, mameBitstream_tryRriteFromCache( context ) );
+            MAMEJPEG_PROC_CHECK( ON_ERROR, mameBitstream_tryWriteFromCache( context ) );
         }
     }
 
@@ -139,6 +178,7 @@ ON_ERROR:
     return ( bits == 0 );
 }
 
+#if 0
 typedef enum {
     MAMEJPEG_ENCODE = 0,
     MAMEJPEG_DECODE = 1,
@@ -154,13 +194,11 @@ typedef enum{
     MAMEJPEG_EOI = 0xffd9,
 } mameJpeg_marker;
 
-
 typedef struct {
     uint8_t* work_buffer;
     size_t work_buffer_length;
-    uint8_t* io_ptr;
-    size_t io_size;
-    mameBitstream_context io_stream[1];
+    mameBitstream_input_context input_stream[1];
+    mameBitstream_output_context output_stream[1];
     mameJpeg_mode mode;
     int progress;
 } mameJpeg_context;
@@ -192,14 +230,14 @@ bool mameJpeg_initialize( mameJpeg_context* context,
                           size_t output_size,
                           mameJpeg_mode mode )
 {
-    NULL_CHECK_PARAM( context )
-    NULL_CHECK_PARAM( work_buffer )
-    CHECK_PARAM( 0 < work_buffer_length )
-    NULL_CHECK_PARAM( input_ptr )
-    CHECK_PARAM( input_size )
-    NULL_CHECK_PARAM( output_ptr )
-    CHECK_PARAM( output_size )
-    CHECK_PARAM( mode == MAMEJPEG_ENCODE || mode == MAMEJPEG_DECODE )
+    MAMEJPEG_NULL_CHECK( context )
+    MAMEJPEG_NULL_CHECK( work_buffer )
+    MAMEJPEG_CHECK( 0 < work_buffer_length )
+    MAMEJPEG_NULL_CHECK( input_ptr )
+    MAMEJPEG_CHECK( input_size )
+    MAMEJPEG_NULL_CHECK( output_ptr )
+    MAMEJPEG_CHECK( output_size )
+    MAMEJPEG_CHECK( mode == MAMEJPEG_ENCODE || mode == MAMEJPEG_DECODE )
 
     context->work_buffer = (uint8_t*)work_buffer;
     context->work_buffer_length = work_buffer_length;
@@ -214,10 +252,30 @@ bool mameJpeg_initialize( mameJpeg_context* context,
     return true;
 }
 
+bool mameJpeg_getNextMarker( mameJpeg_context* context, mameJpeg_marker* marker )
+{
+    uint8_t prefix;
+    while( mameBitstream_readBits( context->io_stream, &prefix, 8 ) )
+    {
+        if( prefix == 0xff )
+        {
+            uint8_t val;
+            MAMEJPEG_PROC_CHECK( END_LOOP, mameBitstream_readBits( context->io_stream, &val, 8 ) );
+
+            *marker = (mameJpeg_marker)(( prefix << 8 ) | val);
+            return true;
+        }
+    }
+END_LOOP:
+
+    return false;
+}
+
+
 bool mameJpeg_Decode( mameJpeg_context* context )
 {
-    NULL_CHECK_PARAM( context )
-    CHECK_PARAM( context->mode == MAMEJPEG_DECODE )
+    NULL_CHECK( context )
+    CHECK( context->mode == MAMEJPEG_DECODE )
 
     mameJpeg_marker marker;
     while( mameJpeg_getNextMarker( context, &marker ) )
@@ -254,29 +312,11 @@ bool mameJpeg_Decode( mameJpeg_context* context )
     return true;
 }
 
-bool mameJpeg_getNextMarker( mameJpeg_context* context, mameJpeg_marker* marker )
-{
-    uint8_t prefix;
-    while( mameBitstream_readBits( context->io_stream, &prefix, 8 ) )
-    {
-        if( prefix == 0xff )
-        {
-            uint8_t val;
-            CHECK_PROC( END_LOOP, mameBitstream_readBits( context->io_stream, &val, 8 ) );
-
-            *marker = ( prefix << 8 ) | val;
-            return true;
-        }
-    }
-END_LOOP:
-
-    return false;
-}
 
 bool mameJpeg_Encode( mameJpeg_context* context )
 {
-    NULL_CHECK_PARAM( context )
-    CHECK_PARAM( context->mode == MAMEJPEG_ENCODE )
+    MAMEJPEG_NULL_CHECK( context )
+    MAMEJPEG_CHECK( context->mode == MAMEJPEG_ENCODE )
 
     return true;
 }
@@ -285,7 +325,7 @@ bool mameJpeg_dispose( mameJpeg_context* context )
 {
     return true;
 }
-
+#endif
 # ifdef __cplusplus
 }
 # endif /* __cplusplus */
