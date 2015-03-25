@@ -47,6 +47,28 @@ bool mameJpeg_output_to_memory_callback( void* param, uint8_t byte )
     return true;
 }
 
+bool mameJpeg_input_from_file_callback( void* param, uint8_t* byte )
+{
+    MAMEJPEG_NULL_CHECK( param )
+    MAMEJPEG_NULL_CHECK( byte )
+
+    FILE* fp = (FILE*)param;
+    uint8_t tmp;
+    size_t n = fread( &tmp, 1, 1, fp );
+
+    return ( n == 1 );
+}
+
+bool mameJpeg_output_to_file_callback( void* param, uint8_t byte )
+{
+    MAMEJPEG_NULL_CHECK( param )
+
+    FILE* fp = (FILE*)param;
+    size_t n = fread( &byte, 1, 1, fp );
+
+    return ( n == 1 );
+}
+
 typedef enum
 {
     MAMEBITSTREAM_INPUT,
@@ -184,13 +206,14 @@ typedef enum {
 } mameJpeg_mode;
 
 typedef enum{
-    MAMEJPEG_SOI = 0xffd8,
-    MAMEJPEG_APP0 = 0xffe0,
-    MAMEJPEG_DQT = 0xffdb,
-    MAMEJPEG_SOF0 = 0xffc0,
-    MAMEJPEG_DHT = 0xffc4,
-    MAMEJPEG_SOS = 0xffda,
-    MAMEJPEG_EOI = 0xffd9,
+    MAMEJPEG_MARKER_SOI = 0xffd8,
+    MAMEJPEG_MARKER_APP0 = 0xffe0,
+    MAMEJPEG_MARKER_DQT = 0xffdb,
+    MAMEJPEG_MARKER_SOF0 = 0xffc0,
+    MAMEJPEG_MARKER_DHT = 0xffc4,
+    MAMEJPEG_MARKER_SOS = 0xffda,
+    MAMEJPEG_MARKER_EOI = 0xffd9,
+    MAMEJPEG_MARKER_UNKNOW = 0x0000,
 } mameJpeg_marker;
 
 typedef struct {
@@ -244,16 +267,15 @@ bool mameJpeg_initialize( mameJpeg_context* context,
     return true;
 }
 
-#if 0
 bool mameJpeg_getNextMarker( mameJpeg_context* context, mameJpeg_marker* marker )
 {
     uint8_t prefix;
-    while( mameBitstream_readBits( context->io_stream, &prefix, 8 ) )
+    while( mameBitstream_readBits( context->input_stream, &prefix, 1, 8 ) )
     {
         if( prefix == 0xff )
         {
             uint8_t val;
-            MAMEJPEG_PROC_CHECK( END_LOOP, mameBitstream_readBits( context->io_stream, &val, 8 ) );
+            MAMEJPEG_PROC_CHECK( END_LOOP, mameBitstream_readBits( context->input_stream, &val, 1, 8 ) );
 
             *marker = (mameJpeg_marker)(( prefix << 8 ) | val);
             return true;
@@ -264,48 +286,95 @@ END_LOOP:
     return false;
 }
 
+typedef bool (*mameJpeg_decodeSegmentFuncPtr)(mameJpeg_context*);
+
+bool mameJpeg_decodeSOISegment( mameJpeg_context* context )
+{
+    printf("call %s\n", __func__ );
+    return true;
+}
+
+bool mameJpeg_decodeAPP0Segment( mameJpeg_context* context )
+{
+    printf("call %s\n", __func__ );
+    return true;
+}
+
+bool mameJpeg_decodeDQTSegment( mameJpeg_context* context )
+{
+    printf("call %s\n", __func__ );
+    return true;
+}
+
+bool mameJpeg_decodeSOF0Segment( mameJpeg_context* context )
+{
+    printf("call %s\n", __func__ );
+    return true;
+}
+
+bool mameJpeg_decodeDHTSegment( mameJpeg_context* context )
+{
+    printf("call %s\n", __func__ );
+    return true;
+}
+
+bool mameJpeg_decodeSOSSegment( mameJpeg_context* context )
+{
+    printf("call %s\n", __func__ );
+    return true;
+}
+
+bool mameJpeg_decodeEOISegment( mameJpeg_context* context )
+{
+    printf("call %s\n", __func__ );
+    return true;
+}
+
+bool mameJpeg_decodeUnknownSegment( mameJpeg_context* context )
+{
+    printf("call %s\n", __func__ );
+    return true;
+}
+
+struct {
+    mameJpeg_marker marker;
+    mameJpeg_decodeSegmentFuncPtr decode_func;
+} decode_func_table[] = {
+    { MAMEJPEG_MARKER_SOI, mameJpeg_decodeSOISegment },
+    { MAMEJPEG_MARKER_APP0, mameJpeg_decodeAPP0Segment },
+    { MAMEJPEG_MARKER_DQT, mameJpeg_decodeDQTSegment },
+    { MAMEJPEG_MARKER_SOF0, mameJpeg_decodeSOF0Segment },
+    { MAMEJPEG_MARKER_DHT, mameJpeg_decodeDHTSegment },
+    { MAMEJPEG_MARKER_SOS, mameJpeg_decodeSOSSegment },
+    { MAMEJPEG_MARKER_EOI, mameJpeg_decodeEOISegment },
+    { MAMEJPEG_MARKER_UNKNOW, mameJpeg_decodeUnknownSegment },
+};
 
 bool mameJpeg_Decode( mameJpeg_context* context )
 {
-    NULL_CHECK( context )
-    CHECK( context->mode == MAMEJPEG_DECODE )
+    MAMEJPEG_NULL_CHECK( context )
+    MAMEJPEG_CHECK( context->mode == MAMEJPEG_DECODE )
 
     mameJpeg_marker marker;
     while( mameJpeg_getNextMarker( context, &marker ) )
     {
-        switch( marker )
+        int func_index = 0;
+        while( ( decode_func_table[ func_index ].marker != marker )
+            && ( decode_func_table[ func_index ].marker != MAMEJPEG_MARKER_UNKNOW ) )
         {
-            case MAMEJPEG_SOI:
-            {
-            }break;
-            case MAMEJPEG_APP0:
-            {
-            }break;
-            case MAMEJPEG_DQT:
-            {
-            }break;
-            case MAMEJPEG_SOF0:
-            {
-            }break;
-            case MAMEJPEG_DHT:
-            {
-            }break;
-            case MAMEJPEG_SOS:
-            {
-            }break;
-            case MAMEJPEG_EOI:
-            {
-            }break;
-            default:
-            {
-            }break;
+            func_index++;
         }
+
+        MAMEJPEG_PROC_CHECK( ON_ERROR, decode_func_table[ func_index ].decode_func( context ) );
     }
 
     return true;
+
+ON_ERROR:
+    return false;
 }
 
-
+#if 0
 bool mameJpeg_Encode( mameJpeg_context* context )
 {
     MAMEJPEG_NULL_CHECK( context )
@@ -313,12 +382,13 @@ bool mameJpeg_Encode( mameJpeg_context* context )
 
     return true;
 }
+#endif
 
 bool mameJpeg_dispose( mameJpeg_context* context )
 {
     return true;
 }
-#endif
+
 # ifdef __cplusplus
 }
 # endif /* __cplusplus */
