@@ -173,6 +173,22 @@ ON_ERROR:
     return ( bits == 0 );
 }
 
+bool mameBitstream_readByte( mameBitstream_context* context, uint8_t* byte )
+{
+    return mameBitstream_readBits( context, byte, 1, 8 );
+}
+
+bool mameBitstream_readTwoByte( mameBitstream_context* context, uint16_t* byte )
+{
+    uint8_t high;
+    MAMEJPEG_CHECK( mameBitstream_readByte( context, &high ) );
+    uint8_t low;
+    MAMEJPEG_CHECK( mameBitstream_readByte( context, &low ) );
+    *byte = ( high << 8 ) | low;
+
+    return true ;
+}
+
 bool mameBitstream_writeBits( mameBitstream_context* context, void* buffer, int bits )
 {
     MAMEJPEG_NULL_CHECK( context )
@@ -207,7 +223,6 @@ typedef enum {
 
 typedef enum{
     MAMEJPEG_MARKER_SOI = 0xffd8,
-    MAMEJPEG_MARKER_APP0 = 0xffe0,
     MAMEJPEG_MARKER_DQT = 0xffdb,
     MAMEJPEG_MARKER_SOF0 = 0xffc0,
     MAMEJPEG_MARKER_DHT = 0xffc4,
@@ -223,6 +238,20 @@ typedef struct {
     mameBitstream_context output_stream[1];
     mameJpeg_mode mode;
     int progress;
+
+    struct {
+        uint8_t acuracy;
+        uint16_t width;
+        uint16_t height;
+        uint8_t component_num;
+        struct {
+            int hor_sampling;
+            int ver_sampling;
+            int quant_table_index;
+        } component [3];
+        uint8_t quant_table[4][64];
+        uint8_t huff_table[4][64];
+    } info;
 } mameJpeg_context;
 
 bool mameJpeg_getImageSize( void* input, int* width, int* height )
@@ -288,13 +317,16 @@ END_LOOP:
 
 typedef bool (*mameJpeg_decodeSegmentFuncPtr)(mameJpeg_context*);
 
-bool mameJpeg_decodeSOISegment( mameJpeg_context* context )
+bool mameJpeg_getSegmentSize( mameJpeg_context* context, uint16_t* size )
 {
-    printf("call %s\n", __func__ );
+    uint16_t whole_size;
+    MAMEJPEG_CHECK( mameBitstream_readTwoByte( context->input_stream, &whole_size) );
+    *size = whole_size - 2;
+
     return true;
 }
 
-bool mameJpeg_decodeAPP0Segment( mameJpeg_context* context )
+bool mameJpeg_decodeSOISegment( mameJpeg_context* context )
 {
     printf("call %s\n", __func__ );
     return true;
@@ -303,24 +335,84 @@ bool mameJpeg_decodeAPP0Segment( mameJpeg_context* context )
 bool mameJpeg_decodeDQTSegment( mameJpeg_context* context )
 {
     printf("call %s\n", __func__ );
+
+    uint16_t dqt_size;
+    MAMEJPEG_CHECK( mameJpeg_getSegmentSize( context, &dqt_size ) );
+    MAMEJPEG_CHECK( dqt_size == ( 64 + 1 ) );
+
+    uint8_t info;
+    MAMEJPEG_CHECK( mameBitstream_readByte( context->input_stream, &info ) );
+    MAMEJPEG_CHECK( ( info >> 4 ) == 0 );
+
+    uint8_t table_no = info & 0x0f;
+    for( int i = 0; i < 64; i++ )
+    {
+        uint8_t* quant_table_ptr = &( context->info.quant_table[table_no][i] );
+        MAMEJPEG_CHECK( mameBitstream_readByte( context->input_stream, quant_table_ptr ) );
+    }
+
     return true;
 }
 
 bool mameJpeg_decodeSOF0Segment( mameJpeg_context* context )
 {
     printf("call %s\n", __func__ );
+    
+    uint16_t sof0_size;
+    MAMEJPEG_CHECK( mameJpeg_getSegmentSize( context, &sof0_size ) );
+    MAMEJPEG_CHECK( sof0_size == 15 );
+
+    MAMEJPEG_CHECK( mameBitstream_readByte( context->input_stream, &(context->info.acuracy) ) );
+    MAMEJPEG_CHECK( mameBitstream_readTwoByte( context->input_stream, &(context->info.height) ) );
+    MAMEJPEG_CHECK( mameBitstream_readTwoByte( context->input_stream, &(context->info.width) ) );
+    MAMEJPEG_CHECK( mameBitstream_readByte( context->input_stream, &(context->info.component_num) ) );
+    MAMEJPEG_CHECK( context->info.component_num < 4 );
+
+    for( int i = 0; i < context->info.component_num; i++ )
+    {
+        uint8_t component_index;
+        MAMEJPEG_CHECK( mameBitstream_readByte( context->input_stream, &component_index ) );
+        component_index--; // component_index is zero origin
+        MAMEJPEG_CHECK( component_index < 3 );
+
+        uint8_t sampling;
+        MAMEJPEG_CHECK( mameBitstream_readByte( context->input_stream, &sampling ) );
+        context->info.component[ component_index ].hor_sampling = sampling >> 4;
+        context->info.component[ component_index ].ver_sampling = sampling & 0xf;
+
+        uint8_t quant_table_index;
+        MAMEJPEG_CHECK( mameBitstream_readByte( context->input_stream, &quant_table_index ) );
+        context->info.component[ component_index ].quant_table_index = quant_table_index;
+    }
+
     return true;
 }
 
 bool mameJpeg_decodeDHTSegment( mameJpeg_context* context )
 {
     printf("call %s\n", __func__ );
+
+    uint16_t dht_size;
+    MAMEJPEG_CHECK( mameJpeg_getSegmentSize( context, &dht_size ) );
+
+    uint8_t info;
+    MAMEJPEG_CHECK( mameBitstream_readByte( context->input_stream, &info ) );
+    MAMEJPEG_CHECK( ( info >> 4 ) == 0 );
+
+    uint8_t table_no = info & 0x0f;
+
+    
     return true;
 }
 
 bool mameJpeg_decodeSOSSegment( mameJpeg_context* context )
 {
     printf("call %s\n", __func__ );
+
+    uint16_t sos_size;
+    MAMEJPEG_CHECK( mameJpeg_getSegmentSize( context, &sos_size ) );
+    printf("%d\n", sos_size);
+
     return true;
 }
 
@@ -341,7 +433,6 @@ struct {
     mameJpeg_decodeSegmentFuncPtr decode_func;
 } decode_func_table[] = {
     { MAMEJPEG_MARKER_SOI, mameJpeg_decodeSOISegment },
-    { MAMEJPEG_MARKER_APP0, mameJpeg_decodeAPP0Segment },
     { MAMEJPEG_MARKER_DQT, mameJpeg_decodeDQTSegment },
     { MAMEJPEG_MARKER_SOF0, mameJpeg_decodeSOF0Segment },
     { MAMEJPEG_MARKER_DHT, mameJpeg_decodeDHTSegment },
