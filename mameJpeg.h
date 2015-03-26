@@ -350,7 +350,7 @@ struct {
     { MAMEJPEG_MARKER_UNKNOW, mameJpeg_decodeUnknownSegment },
 };
 
-bool mameJpeg_Decode( mameJpeg_context* context )
+bool mameJpeg_decode( mameJpeg_context* context )
 {
     MAMEJPEG_NULL_CHECK( context )
     MAMEJPEG_CHECK( context->mode == MAMEJPEG_DECODE )
