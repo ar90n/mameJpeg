@@ -191,13 +191,15 @@ bool mameBitstream_readBits( mameBitstream_context* context,
     int buffer_pos = ( bits - 1 ) >> 3;
     while( 0 < bits )
     {
-        int read_bits = ( bits & 0x07 != 0 ) ? ( bits & 0x07 ) : 8;
+        uint8_t remain_bits = bits & 0x07;
+        uint8_t read_bits = ( remain_bits != 0 ) ? remain_bits : 8;
         if( context->cache_use_bits < read_bits )
         {
             MAMEJPEG_CHECK( mameBitstream_tryReadIntoCache( context ) );
         }
 
-        ((uint8_t*)buffer)[ buffer_pos ] = ( context->cache >> ( 16 - read_bits ) );
+        uint8_t shift_width = 16 - read_bits;
+        ((uint8_t*)buffer)[ buffer_pos ] = ( context->cache >> shift_width );
         buffer_pos--;
         bits -= read_bits;
 
@@ -230,15 +232,17 @@ bool mameBitstream_writeBits( mameBitstream_context* context, void* buffer, int 
     MAMEJPEG_CHECK( context->mode == MAMEBITSTREAM_WRITE );
     MAMEJPEG_NULL_CHECK( buffer );
 
-    int buffer_pos = 0;
+    int buffer_pos = ( bits - 1 ) >> 3;
     while( 0 < bits )
     {
-        int write_bits = ( 8 < bits ) ? 8 : bits;
+        uint8_t remain_bits = bits & 0x07;
+        uint8_t write_bits = ( remain_bits != 0 ) ? remain_bits : 8;
         uint8_t cache_mask = ( 1 << write_bits ) - 1;
-        context->cache |= ( (((uint8_t*)buffer)[ buffer_pos ] ) & cache_mask ) << ( 16 - context->cache_use_bits - write_bits );
+        uint8_t shift_width = 16 - context->cache_use_bits - write_bits;
+        context->cache |= ( (((uint8_t*)buffer)[ buffer_pos ] ) & cache_mask ) << shift_width;
         context->cache_use_bits += write_bits;
 
-        buffer_pos++;
+        buffer_pos--;
         bits -= write_bits;
 
         if( 8 <= context->cache_use_bits )

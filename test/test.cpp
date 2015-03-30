@@ -75,34 +75,34 @@ TEST_CASE("Bitsteram write test", "[sample]")
     mameJpeg_memory_callback_param param = { buffer, 0, sizeof( buffer ) / sizeof( uint8_t ) };
     mameBitstream_output_initialize( bitstream, mameJpeg_output_to_memory_callback, mameJpeg_rewind_memory_callback, &param  );
 
-    uint8_t data8 = 0x00;
+    uint8_t data8 = 0x01;
     CHECK( mameBitstream_writeBits(bitstream, &data8, 1 ) );
     data8 = 0x01;
     CHECK( mameBitstream_writeBits(bitstream, &data8, 1 ) );
-    data8 = 0x00;
+    data8 = 0x01;
     CHECK( mameBitstream_writeBits(bitstream, &data8, 1 ) );
     data8 = 0x01;
     CHECK( mameBitstream_writeBits(bitstream, &data8, 1 ) );
 
-    data8 = 0x07;
+    data8 = 0x05;
     CHECK( mameBitstream_writeBits(bitstream, &data8, 3 ) );
-    data8 = 0x07;
+    data8 = 0x02;
     CHECK( mameBitstream_writeBits(bitstream, &data8, 3 ) );
   
-    data8 = 0xaa;
+    data8 = 0xac;
     CHECK( mameBitstream_writeBits(bitstream, &data8, 8 ) );
 
-    uint16_t data16 = 0xccc;
+    uint16_t data16 = 0xcac;
     CHECK( mameBitstream_writeBits(bitstream, &data16, 12 ) );
  
-    uint32_t data32 = 0x30fe2;
+    uint32_t data32 = 0x3f8c3;
     CHECK( mameBitstream_writeBits(bitstream, &data32, 18 ) );
 
     data8 = 0xaa;
     CHECK( mameBitstream_writeBits(bitstream, &data8, 8 ) );
-    data16 = 0xbbaa;
+    data16 = 0xaabb;
     CHECK( mameBitstream_writeBits(bitstream, &data16, 16 ) );
-
+    
     int res = memcmp( buffer, "\xfa\xab\x32\xb3\xf8\xc3\xaa\xaa\xbb", sizeof( buffer ) / sizeof( uint8_t ) );
     CHECK( res == 0 );
 }
