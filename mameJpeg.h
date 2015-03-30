@@ -659,7 +659,7 @@ bool mameJpeg_decodeMCU( mameJpeg_context* context )
             //printf("%x\n", value);
     }
 #endif
-    return false;
+    return true;
 }
 
 bool mameJpeg_decodeSOSSegment( mameJpeg_context* context )
