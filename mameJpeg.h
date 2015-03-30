@@ -301,6 +301,8 @@ typedef struct {
             int hor_sampling;
             int ver_sampling;
             int quant_table_index;
+            int huff_table_dc_index;
+            int huff_table_ac_index;
         } component [3];
         uint8_t quant_table[4][64];
         struct {
@@ -557,11 +559,45 @@ bool mameJpeg_decodeDHTSegment( mameJpeg_context* context )
     return true;
 }
 
+bool mameJpeg_decodeHuffmanCode( mameJpeg_context* context, uint16_t code, uint8_t code_length, uint8_t* value )
+{
+
+            uint8_t tmp;
+            MAMEJPEG_CHECK( mameBitstream_readBits( context->input_stream, &tmp, 1, 1 ) );
+            code = ( code << 1 ) | tmp;
+
+            uint8_t from_index = ( code_length == 0 ) ? 0 : context->info.huff_table[ac_dc][luma_chroma].offsets[ code_length - 1 ];
+            uint8_t to_index = context->info.huff_table[ac_dc][luma_chroma].offsets[ code_length ];
+            uint8_t length = 0;
+            for( uint8_t i = from_index; i < to_index; i++ )
+            {
+                if( context->info.huff_table[ac_dc][luma_chroma].elements[i].code == code )
+                {
+                    length = context->info.huff_table[ac_dc][luma_chroma].elements[i].value;
+
+                    uint16_t value;
+                    MAMEJPEG_CHECK( mameBitstream_readBits( context->input_stream, &value, 2, length ) );
+                    printf("%d - %x\n", length,value);
+                    break;
+                }
+            }
+}
+
+bool mameJpeg_decodeMCUDC( mameJpeg_context* context )
+{
+    return true;
+}
+bool mameJpeg_decodeMCUAC( mameJpeg_context* context )
+{
+    return true;
+}
+
 bool mameJpeg_decodeMCU( mameJpeg_context* context )
 {
 #if 1
-    //for( int i = 0; i < context->info.component_num; i++ )
+    for( int i = 0; i < context->info.component_num; i++ )
     {
+        printf("ac_dc %d, luma_chroma %d\n", ac_dc, luma_chroma);
         uint8_t code_length =0;
         uint16_t code = 0;
         for( uint8_t code_length = 1; code_length < 16; code_length++ )
@@ -570,14 +606,14 @@ bool mameJpeg_decodeMCU( mameJpeg_context* context )
             MAMEJPEG_CHECK( mameBitstream_readBits( context->input_stream, &tmp, 1, 1 ) );
             code = ( code << 1 ) | tmp;
 
-            uint8_t from_index = ( code_length == 0 ) ? 0 : context->info.huff_table[0][0].offsets[ code_length - 1 ];
-            uint8_t to_index = context->info.huff_table[0][0].offsets[ code_length ];
+            uint8_t from_index = ( code_length == 0 ) ? 0 : context->info.huff_table[ac_dc][luma_chroma].offsets[ code_length - 1 ];
+            uint8_t to_index = context->info.huff_table[ac_dc][luma_chroma].offsets[ code_length ];
             uint8_t length = 0;
             for( uint8_t i = from_index; i < to_index; i++ )
             {
-                if( context->info.huff_table[0][0].elements[i].code == code )
+                if( context->info.huff_table[ac_dc][luma_chroma].elements[i].code == code )
                 {
-                    length = context->info.huff_table[0][0].elements[i].value;
+                    length = context->info.huff_table[ac_dc][luma_chroma].elements[i].value;
 
                     uint16_t value;
                     MAMEJPEG_CHECK( mameBitstream_readBits( context->input_stream, &value, 2, length ) );
@@ -653,7 +689,7 @@ bool mameJpeg_decodeMCU( mameJpeg_context* context )
     for( int i =0; i < 15; i++ )
     {
             uint8_t value;
-            mameBitstream_readBits( context->input_stream, &value, 1, 8 );
+            mameBitst[ream_readBits( context->input_stream, &value, 1, 8 );
             printf("%x\n", value);
             //mameBitstream_readBits( context->input_stream, &value, 1, 1 );
             //printf("%x\n", value);
@@ -672,12 +708,14 @@ bool mameJpeg_decodeSOSSegment( mameJpeg_context* context )
     uint8_t num_of_components;
     MAMEJPEG_CHECK( mameBitstream_readByte( context->input_stream, &num_of_components ) );
 
-    uint8_t info[ num_of_components ];
     for( int i = 0; i < num_of_components; i++ )
     {
         uint8_t component_index;
         MAMEJPEG_CHECK( mameBitstream_readByte( context->input_stream, &component_index ) );
-        MAMEJPEG_CHECK( mameBitstream_readByte( context->input_stream, &(info[component_index]) ) );
+        uint8_t info;
+        MAMEJPEG_CHECK( mameBitstream_readByte( context->input_stream, &info ) );
+        context->info.component[component_index - 1].huff_table_ac_index = info >> 4;
+        context->info.component[component_index - 1].huff_table_dc_index = info & 0xf;
     }
 
     uint8_t dummy;
