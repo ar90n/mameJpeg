@@ -188,36 +188,16 @@ bool mameBitstream_readBits( mameBitstream_context* context,
     MAMEJPEG_NULL_CHECK( buffer );
     MAMEJPEG_CHECK( bits <= ( 8 * buffer_length ) );
 
-    uint8_t bytes = ( bits - 1 ) >> 3;
-    uint8_t remain_bits = bits & 0x07;
-    int buffer_pos = bytes;
-
-    if( 0 < remain_bits )
-    {
-    if( context->cache_use_bits < remain_bits )
-    {
-        MAMEJPEG_CHECK( mameBitstream_tryReadIntoCache( context ) );
-    }
-
-    ((uint8_t*)buffer)[ buffer_pos ] = ( context->cache >> ( 16 - remain_bits ) );
-    //printf("pos - %d %d %d %x\n", buffer_pos,remain_bits,((uint8_t*)buffer)[ buffer_pos ], context->cache );
-    buffer_pos--;
-    bits -= remain_bits;
-
-    context->cache <<= remain_bits;
-    context->cache_use_bits -= remain_bits;
-    }
+    int buffer_pos = ( bits - 1 ) >> 3;
     while( 0 < bits )
     {
-        int read_bits = ( 8 < bits ) ? 8 : bits;
+        int read_bits = ( bits & 0x07 != 0 ) ? ( bits & 0x07 ) : 8;
         if( context->cache_use_bits < read_bits )
         {
             MAMEJPEG_CHECK( mameBitstream_tryReadIntoCache( context ) );
         }
 
-        uint8_t cache_mask = ( 1 << read_bits ) - 1;
         ((uint8_t*)buffer)[ buffer_pos ] = ( context->cache >> ( 16 - read_bits ) );
-        //printf("pos - %d %d %d %x\n", buffer_pos,read_bits,((uint8_t*)buffer)[ buffer_pos ], context->cache );
         buffer_pos--;
         bits -= read_bits;
 
