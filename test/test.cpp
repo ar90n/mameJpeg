@@ -109,8 +109,8 @@ TEST_CASE("Bitsteram write test", "[sample]")
 
 TEST_CASE("Decode jpeg", "[sample]")
 {
-    uint8_t output_buffer[1024];
-    uint8_t work_buffer[1024];
+    uint8_t output_buffer[1024 * 1024];
+    uint8_t work_buffer[1024 * 1024];
     mameJpeg_context context[1];
     mameJpeg_memory_callback_param input_param = { (void*)jpeg_blob, 0, sizeof( jpeg_blob ) / sizeof( uint8_t ) };
     mameJpeg_memory_callback_param output_param = { output_buffer, 0, sizeof( output_buffer ) / sizeof( uint8_t ) };
@@ -124,7 +124,17 @@ TEST_CASE("Decode jpeg", "[sample]")
                          MAMEJPEG_FORMAT_Y,
                          MAMEJPEG_DECODE );
 
+    mameJpeg_setWorkBuffer( context, work_buffer, 1024 * 1024 );
     mameJpeg_decode( context );
+
+    for( int y = 0; y < 16; y++ )
+    {
+        for( int x = 0; x < 16; x++ )
+        {
+            printf("%4d ", work_buffer[ 16 * y + x ] );
+        }
+        printf("\n");
+    }
 
     //mameJpeg_dumpHeader( context );
 }

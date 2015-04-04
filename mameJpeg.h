@@ -254,6 +254,11 @@ bool mameBitstream_writeBits( mameBitstream_context* context, void* buffer, int 
     return ( bits == 0 );
 }
 
+bool mameBitstream_writeByte( mameBitstream_context* context, uint8_t byte )
+{
+    return mameBitstream_writeBits( context, &byte, 8 );
+}
+
 bool mameBitstream_rewind( mameBitstream_context* context )
 {
     MAMEJPEG_NULL_CHECK( context );
@@ -302,6 +307,7 @@ typedef struct {
             int ver_sampling;
             int quant_table_index;
             int huff_table_index[2];
+            int prev_dc_value;
         } component [3];
         uint8_t quant_table[4][64];
         struct {
@@ -311,6 +317,9 @@ typedef struct {
                 uint8_t value;
             } elements[ 512];
         } huff_table[2][2];
+
+        double work_mcu[8][8];
+        double work_mcu2[8][8];
     } info;
 } mameJpeg_context;
 
@@ -427,6 +436,9 @@ bool mameJpeg_setWorkBuffer( mameJpeg_context* context, void* work_buffer, size_
 
 bool mameJpeg_getNextMarker( mameJpeg_context* context, mameJpeg_marker* marker )
 {
+    MAMEJPEG_NULL_CHECK( context );
+    MAMEJPEG_NULL_CHECK( marker );
+
     uint8_t prefix;
     while( mameBitstream_readBits( context->input_stream, &prefix, 1, 8 ) )
     {
@@ -448,6 +460,9 @@ typedef bool (*mameJpeg_decodeSegmentFuncPtr)(mameJpeg_context*);
 
 bool mameJpeg_getSegmentSize( mameJpeg_context* context, uint16_t* size )
 {
+    MAMEJPEG_NULL_CHECK( context );
+    MAMEJPEG_NULL_CHECK( size );
+
     uint16_t whole_size;
     MAMEJPEG_CHECK( mameBitstream_readTwoByte( context->input_stream, &whole_size) );
     *size = whole_size - 2;
@@ -457,12 +472,14 @@ bool mameJpeg_getSegmentSize( mameJpeg_context* context, uint16_t* size )
 
 bool mameJpeg_decodeSOISegment( mameJpeg_context* context )
 {
+    MAMEJPEG_NULL_CHECK( context );
     printf("call %s\n", __func__ );
     return true;
 }
 
 bool mameJpeg_decodeDQTSegment( mameJpeg_context* context )
 {
+    MAMEJPEG_NULL_CHECK( context );
     printf("call %s\n", __func__ );
 
     uint16_t dqt_size;
@@ -485,6 +502,7 @@ bool mameJpeg_decodeDQTSegment( mameJpeg_context* context )
 
 bool mameJpeg_decodeSOF0Segment( mameJpeg_context* context )
 {
+    MAMEJPEG_NULL_CHECK( context );
     printf("call %s\n", __func__ );
     
     uint16_t sof0_size;
@@ -519,6 +537,7 @@ bool mameJpeg_decodeSOF0Segment( mameJpeg_context* context )
 
 bool mameJpeg_decodeDHTSegment( mameJpeg_context* context )
 {
+    MAMEJPEG_NULL_CHECK( context );
     printf("call %s\n", __func__ );
 
     uint16_t dht_size;
@@ -547,7 +566,7 @@ bool mameJpeg_decodeDHTSegment( mameJpeg_context* context )
         total_codes += num_of_codes;
     }
     MAMEJPEG_CHECK( 17 + total_codes == dht_size );
-    
+
     for( int i = 0; i < total_codes; i++ )
     {
         uint8_t zero_length;
@@ -558,8 +577,22 @@ bool mameJpeg_decodeDHTSegment( mameJpeg_context* context )
     return true;
 }
 
+bool mameJpeg_readImageData( mameJpeg_context* context, void* buffer, int buffer_length, int bits )
+{
+    return mameBitstream_readBits( context->input_stream, buffer, buffer_length, bits );
+}
+
+bool mameJpeg_writeImageData( mameJpeg_context* context, void* buffer, int bits )
+{
+    return mameBitstream_writeBits( context->output_stream, buffer, bits );
+}
+
 bool mameJpeg_decodeHuffmanCode( mameJpeg_context* context, uint8_t ac_dc, uint8_t table_index, uint16_t code, uint8_t code_length, uint8_t* value )
 {
+    MAMEJPEG_NULL_CHECK( context );
+    MAMEJPEG_NULL_CHECK( value );
+    MAMEJPEG_CHECK( 0 < code_length );
+
     uint8_t from_index = ( code_length == 0 ) ? 0 : context->info.huff_table[ac_dc][table_index].offsets[ code_length - 1 ];
     uint8_t to_index = context->info.huff_table[ac_dc][table_index].offsets[ code_length ];
     for( uint8_t i = from_index; i < to_index; i++ )
@@ -576,6 +609,9 @@ bool mameJpeg_decodeHuffmanCode( mameJpeg_context* context, uint8_t ac_dc, uint8
 
 bool mameJpeg_getNextDecodedValue( mameJpeg_context* context, uint8_t ac_dc, uint8_t compoent_index, uint8_t* decoded_value )
 {
+    MAMEJPEG_NULL_CHECK( context );
+    MAMEJPEG_NULL_CHECK( decoded_value );
+
     uint16_t code = 0;
     for( uint8_t code_length = 1; code_length < 16; code_length++ )
     {
@@ -584,7 +620,7 @@ bool mameJpeg_getNextDecodedValue( mameJpeg_context* context, uint8_t ac_dc, uin
         code = ( code << 1 ) | tmp;
 
         uint8_t length;
-        bool ret = mameJpeg_decodeHuffmanCode( context, 0, context->info.component[ compoent_index ].huff_table_index[ac_dc], code, code_length, decoded_value );
+        bool ret = mameJpeg_decodeHuffmanCode( context, ac_dc, context->info.component[ compoent_index ].huff_table_index[ac_dc], code, code_length, decoded_value );
         if( ret )
         {
             return true;
@@ -594,122 +630,177 @@ bool mameJpeg_getNextDecodedValue( mameJpeg_context* context, uint8_t ac_dc, uin
     return false;
 }
 
-bool mameJpeg_decodeMCUDC( mameJpeg_context* context, uint8_t compoent_index )
+bool mameJpeg_calcDCValue( mameJpeg_context* context, uint16_t diff_value, uint8_t length, int16_t* dc_value )
 {
-    uint8_t length;
-    MAMEJPEG_CHECK( mameJpeg_getNextDecodedValue( context, 0, compoent_index, &length ) );
-    uint16_t value;
-    MAMEJPEG_CHECK( mameBitstream_readBits( context->input_stream, &value, 2, length ) );
-    printf("%d - %x\n", length, value );
+    MAMEJPEG_NULL_CHECK( context );
+    MAMEJPEG_NULL_CHECK( dc_value );
+    MAMEJPEG_CHECK( 0 < length );
 
+    int base_value = ( ( diff_value >> ( length - 1 ) ) == 0 ) ? ( -( ( 1 << length ) - 1 ) ): ( 1 << ( length - 1 ) );
+    *dc_value = ( diff_value & ( ( 1 << ( length - 1 ) ) - 1 ) ) + base_value;
     return true;
 }
-bool mameJpeg_decodeMCUAC( mameJpeg_context* context, uint8_t compoent_index )
+
+bool mameJpeg_decodeDC( mameJpeg_context* context, uint8_t compoent_index )
 {
+    MAMEJPEG_NULL_CHECK( context );
+
+    uint8_t length;
+    MAMEJPEG_CHECK( mameJpeg_getNextDecodedValue( context, 0, compoent_index, &length ) );
+    if( length == 0 )
+    {
+        context->info.work_mcu[0][0] = -1024;
+        return true;
+    }
+
+    uint16_t huffman_dc_value;
+    MAMEJPEG_CHECK( mameBitstream_readBits( context->input_stream, &huffman_dc_value, 2, length ) );
+    int16_t diff_value;
+    MAMEJPEG_CHECK( mameJpeg_calcDCValue( context, huffman_dc_value, length, &diff_value ) );
+
+    context->info.component[ compoent_index ].prev_dc_value += diff_value;
+    context->info.work_mcu[0][0] = context->info.component[ compoent_index ].prev_dc_value;
+    return true;
+}
+
+bool mameJpeg_decodeAC( mameJpeg_context* context, uint8_t compoent_index )
+{
+    MAMEJPEG_NULL_CHECK( context );
+
     while( 1 )
     {
         uint8_t length;
         MAMEJPEG_CHECK( mameJpeg_getNextDecodedValue( context, 1, compoent_index, &length ) );
         if( length == 0 )
         {
-            return false;
+            return true;
         }
+
+        printf(" ac data exists \n " );
+        return false;
 
         uint16_t value;
         MAMEJPEG_CHECK( mameBitstream_readBits( context->input_stream, &value, 2, length ) );
-        printf("%d - %x\n", length, value );
     }
 
     return true;
 }
 
-bool mameJpeg_decodeMCU( mameJpeg_context* context )
+bool mameJpeg_applyDCT( mameJpeg_context* context, bool is_forward )
 {
-#if 1
+    MAMEJPEG_NULL_CHECK( context );
+
+    double res1[8][8];
+    for( int y = 0; y < 8; y++ )
+    {
+        for( int x = 0; x < 8; x++ )
+        {
+            double tmp = context->info.work_mcu[y][0] * cos( 3.14 / 8 * 0 * ( x + 0.5 ) );
+            tmp += context->info.work_mcu[y][1] * cos( 3.14 / 8 * 1 * ( x + 0.5 ) );
+            tmp += context->info.work_mcu[y][2] * cos( 3.14 / 8 * 2 * ( x + 0.5 ) );
+            tmp += context->info.work_mcu[y][3] * cos( 3.14 / 8 * 3 * ( x + 0.5 ) );
+            tmp += context->info.work_mcu[y][4] * cos( 3.14 / 8 * 4 * ( x + 0.5 ) );
+            tmp += context->info.work_mcu[y][5] * cos( 3.14 / 8 * 5 * ( x + 0.5 ) );
+            tmp += context->info.work_mcu[y][6] * cos( 3.14 / 8 * 6 * ( x + 0.5 ) );
+            tmp += context->info.work_mcu[y][7] * cos( 3.14 / 8 * 7 * ( x + 0.5 ) );
+
+            res1[x][y] = tmp;
+        }
+
+    }
+    for( int y = 0; y < 8; y++ )
+    {
+        for( int x = 0; x < 8; x++ )
+        {
+            double tmp = res1[y][0] * cos( 3.14 / 8 * 0 * ( x + 0.5 ) );
+            tmp += res1[y][1] * cos( 3.14 / 8 * 1 * ( x + 0.5 ) );
+            tmp += res1[y][2] * cos( 3.14 / 8 * 2 * ( x + 0.5 ) );
+            tmp += res1[y][3] * cos( 3.14 / 8 * 3 * ( x + 0.5 ) );
+            tmp += res1[y][4] * cos( 3.14 / 8 * 4 * ( x + 0.5 ) );
+            tmp += res1[y][5] * cos( 3.14 / 8 * 5 * ( x + 0.5 ) );
+            tmp += res1[y][6] * cos( 3.14 / 8 * 6 * ( x + 0.5 ) );
+            tmp += res1[y][7] * cos( 3.14 / 8 * 7 * ( x + 0.5 ) );
+
+            context->info.work_mcu2[y][x] += ( tmp / 16 + 64 );
+        }
+    }
+
+    return true;
+}
+
+bool mameJpeg_applyInverseQunatize( mameJpeg_context* context, uint8_t compoent_index  )
+{
+    MAMEJPEG_NULL_CHECK( context );
+    return true;
+}
+
+bool mameJpeg_decodeMCU( mameJpeg_context* context, uint16_t ver_mcu_index, uint16_t hor_mcu_index )
+{
+    MAMEJPEG_NULL_CHECK( context );
+
     for( int i = 0; i < context->info.component_num; i++ )
     {
-        mameJpeg_decodeMCUDC( context, i );
-        mameJpeg_decodeMCUAC( context, i );
-
-        /*
-        code_length =0;
-        code = 0;
-        for( uint8_t code_length = 0; code_length < 16; code_length++ )
+        for( int y = 0; y < 8; y++ )
         {
-            uint8_t tmp;
-            MAMEJPEG_CHECK( mameBitstream_readBits( context->input_stream, &tmp, 1, 1 ) );
-            code = ( code << 1 ) | tmp;
-
-            uint8_t from_index = ( code_length == 0 ) ? 0 : context->info.huff_table[1][0].offsets[ code_length - 1 ];
-            uint8_t to_index = context->info.huff_table[1][0].offsets[ code_length ];
-            uint8_t length = 0;
-            for( uint8_t i = from_index; i < to_index; i++ )
+            for( int x = 0; x < 8; x ++ )
             {
-                if( context->info.huff_table[0][0].elements[i].code == code )
-                {
-                    length = context->info.huff_table[0][0].elements[i].value;
-                    break;
-                }
+                context->info.work_mcu[y][x] = 0.0;
             }
-
-            if( length == 0 )
-            {
-                break;
-            }
-
-            uint16_t value;
-            MAMEJPEG_CHECK( mameBitstream_readBits( context->input_stream, &value, 2, length ) );
-            printf("%x ", value);
         }
 
-        code_length =0;
-        code = 0;
-        for( uint8_t code_length = 0; code_length < 16; code_length++ )
-        {
-            uint8_t tmp;
-            MAMEJPEG_CHECK( mameBitstream_readBits( context->input_stream, &tmp, 1, 1 ) );
-            code = ( code << 1 ) | tmp;
-
-            uint8_t from_index = ( code_length == 0 ) ? 0 : context->info.huff_table[1][0].offsets[ code_length - 1 ];
-            uint8_t to_index = context->info.huff_table[1][0].offsets[ code_length ];
-            uint8_t length = 0;
-            for( uint8_t i = from_index; i < to_index; i++ )
-            {
-                if( context->info.huff_table[0][0].elements[i].code == code )
-                {
-                    length = context->info.huff_table[0][0].elements[i].value;
-                    break;
-                }
-            }
-
-            if( length == 0 )
-            {
-                break;
-            }
-
-            uint16_t value;
-            MAMEJPEG_CHECK( mameBitstream_readBits( context->input_stream, &value, 2, length ) );
-            printf("%x ", value);
-        }
-        */
-
+        MAMEJPEG_CHECK( mameJpeg_decodeDC( context, i ) );
+        MAMEJPEG_CHECK( mameJpeg_decodeAC( context, i ) );
+        MAMEJPEG_CHECK( mameJpeg_applyDCT( context, false ) );
+        MAMEJPEG_CHECK( mameJpeg_applyInverseQunatize( context, i ) );
     }
-#endif
-#if 0 
-    for( int i =0; i < 15; i++ )
+
+    for( int y = 0; y < 8; y++ )
     {
-            uint8_t value;
-            mameBitst[ream_readBits( context->input_stream, &value, 1, 8 );
-            printf("%x\n", value);
-            //mameBitstream_readBits( context->input_stream, &value, 1, 1 );
-            //printf("%x\n", value);
+        for( int x = 0; x < 8; x++ )
+        {
+            uint16_t index = ( y +  8 * ver_mcu_index ) * context->info.width + 8 * hor_mcu_index + x;
+            context->work_buffer[ index ] = (uint8_t)(context->info.work_mcu2[y][x]);
+        }
     }
-#endif
-    return false;
+
+
+    return true;
+}
+
+bool mameJpeg_writeBuffer( mameJpeg_context* context )
+{
+    for( uint16_t i = 0; i < 8 * context->info.width; i++ )
+    {
+        mameBitstream_writeByte( context->output_stream, ((uint8_t*)context->work_buffer)[i] );
+    }
+
+    return true;
+}
+
+bool mameJpeg_decodeImage( mameJpeg_context* context )
+{
+    uint16_t hor_mcu_num = context->info.width >> 3;
+    uint16_t ver_mcu_num = context->info.width >> 3;
+    for( uint16_t ver_mcu_index = 0; ver_mcu_index < ver_mcu_num; ver_mcu_index++ )
+    {
+        for( uint16_t hor_mcu_index = 0; hor_mcu_index < hor_mcu_num; hor_mcu_index++)
+        {
+            mameJpeg_decodeMCU( context, ver_mcu_index, hor_mcu_index );
+        }
+
+        mameJpeg_writeBuffer( context );
+    }
+
+    //cache invalidate
+    context->input_stream->cache = 0;
+    context->input_stream->cache_use_bits = 0;
+
+    return true;
 }
 
 bool mameJpeg_decodeSOSSegment( mameJpeg_context* context )
 {
+    MAMEJPEG_NULL_CHECK( context );
     printf("call %s\n", __func__ );
 
     uint16_t sos_size;
@@ -736,20 +827,20 @@ bool mameJpeg_decodeSOSSegment( mameJpeg_context* context )
     MAMEJPEG_CHECK( mameBitstream_readByte( context->input_stream, &dummy ) );
     MAMEJPEG_CHECK( dummy == 0 );
 
-    while( mameJpeg_decodeMCU( context ) )
-    {
-    }
+    MAMEJPEG_CHECK( mameJpeg_decodeImage( context ) );
     return true;
 }
 
 bool mameJpeg_decodeEOISegment( mameJpeg_context* context )
 {
+    MAMEJPEG_NULL_CHECK( context );
     printf("call %s\n", __func__ );
     return true;
 }
 
 bool mameJpeg_decodeUnknownSegment( mameJpeg_context* context )
 {
+    MAMEJPEG_NULL_CHECK( context );
     printf("call %s\n", __func__ );
     return true;
 }
@@ -800,6 +891,7 @@ bool mameJpeg_Encode( mameJpeg_context* context )
 
 bool mameJpeg_dispose( mameJpeg_context* context )
 {
+    MAMEJPEG_NULL_CHECK( context );
     return true;
 }
 
