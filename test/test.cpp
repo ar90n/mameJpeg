@@ -131,7 +131,7 @@ TEST_CASE("Decode jpeg", "[sample]")
     {
         for( int x = 0; x < 16; x++ )
         {
-            printf("%4d ", work_buffer[ 16 * y + x ] );
+            printf("%4d ", output_buffer[ 16 * y + x ] );
         }
         printf("\n");
     }

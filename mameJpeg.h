@@ -289,8 +289,9 @@ typedef enum{
 } mameJpeg_marker;
 
 typedef struct {
-    uint8_t* work_buffer;
+    void* work_buffer;
     size_t work_buffer_length;
+    uint8_t* line_buffer;
     mameBitstream_context input_stream[1];
     mameBitstream_context output_stream[1];
     mameJpeg_format format;
@@ -315,11 +316,11 @@ typedef struct {
             struct {
                 uint16_t code;
                 uint8_t value;
-            } elements[ 512];
+            } elements[512];
         } huff_table[2][2];
 
-        double work_mcu[8][8];
-        double work_mcu2[8][8];
+        double* mcu_dct_coeffs;
+        double* mcu_pixels;
     } info;
 } mameJpeg_context;
 
@@ -428,9 +429,12 @@ bool mameJpeg_setWorkBuffer( mameJpeg_context* context, void* work_buffer, size_
     MAMEJPEG_NULL_CHECK( work_buffer );
     MAMEJPEG_CHECK( 0 < work_buffer_length );
 
-    context->work_buffer = (uint8_t*)work_buffer;
+    context->work_buffer = work_buffer;
     context->work_buffer_length = work_buffer_length;
 
+    context->info.mcu_dct_coeffs = (double*)work_buffer;
+    context->info.mcu_pixels = context->info.mcu_dct_coeffs + 64;
+    context->line_buffer = (uint8_t*)(context->info.mcu_pixels + 64);
     return true;
 }
 
@@ -641,7 +645,7 @@ bool mameJpeg_calcDCValue( mameJpeg_context* context, uint16_t diff_value, uint8
     return true;
 }
 
-bool mameJpeg_decodeDC( mameJpeg_context* context, uint8_t compoent_index )
+bool mameJpeg_decodeDC( mameJpeg_context* context, uint8_t compoent_index, bool* has_data )
 {
     MAMEJPEG_NULL_CHECK( context );
 
@@ -649,9 +653,12 @@ bool mameJpeg_decodeDC( mameJpeg_context* context, uint8_t compoent_index )
     MAMEJPEG_CHECK( mameJpeg_getNextDecodedValue( context, 0, compoent_index, &length ) );
     if( length == 0 )
     {
-        context->info.work_mcu[0][0] = -1024;
+        context->info.mcu_dct_coeffs[0] = -1024;
+        *has_data = false;
         return true;
     }
+
+    *has_data = true;
 
     uint16_t huffman_dc_value;
     MAMEJPEG_CHECK( mameBitstream_readBits( context->input_stream, &huffman_dc_value, 2, length ) );
@@ -659,28 +666,66 @@ bool mameJpeg_decodeDC( mameJpeg_context* context, uint8_t compoent_index )
     MAMEJPEG_CHECK( mameJpeg_calcDCValue( context, huffman_dc_value, length, &diff_value ) );
 
     context->info.component[ compoent_index ].prev_dc_value += diff_value;
-    context->info.work_mcu[0][0] = context->info.component[ compoent_index ].prev_dc_value;
+    context->info.mcu_dct_coeffs[0] = context->info.component[ compoent_index ].prev_dc_value;
     return true;
 }
 
-bool mameJpeg_decodeAC( mameJpeg_context* context, uint8_t compoent_index )
+uint8_t mameJpeg_getZigZagIndex( mameJpeg_context* context, uint8_t index )
+{
+    uint8_t zigzag_index_map[] =
+    {
+        0,   1,  8, 16,  9,  2,  3, 10,
+        17, 24, 32, 25, 18, 11,  4,  5,
+        12, 19, 26, 33, 40, 48, 41, 34,
+        27, 20, 13,  6,  7, 14, 21, 28,
+        35, 42, 49, 56, 57, 50, 43, 36,
+        29, 22, 15, 23, 30, 37, 44, 51,
+        58, 59, 52, 45, 38, 31, 39, 46,
+        53, 60, 61, 54, 47, 55, 62, 63
+    };
+
+    return zigzag_index_map[ index ];
+}
+
+bool mameJpeg_decodeAC( mameJpeg_context* context, uint8_t compoent_index, bool* has_data )
 {
     MAMEJPEG_NULL_CHECK( context );
 
-    while( 1 )
+    *has_data = false;
+    uint8_t elem_num = 1;
+    while( elem_num < 64 )
     {
-        uint8_t length;
-        MAMEJPEG_CHECK( mameJpeg_getNextDecodedValue( context, 1, compoent_index, &length ) );
-        if( length == 0 )
+        uint8_t value;
+        MAMEJPEG_CHECK( mameJpeg_getNextDecodedValue( context, 1, compoent_index, &value ) );
+
+        uint8_t zero_run_length = value >> 4;
+        uint8_t bit_length = value & 0x0f;
+        if( zero_run_length == 0 && bit_length == 0 )
         {
-            return true;
+            zero_run_length = 64 - elem_num;
         }
 
-        printf(" ac data exists \n " );
-        return false;
+        for( uint8_t i = 0; i < zero_run_length; i++ )
+        {
+            uint8_t zigzag_index = mameJpeg_getZigZagIndex( context, elem_num );
+            context->info.mcu_dct_coeffs[zigzag_index] = 0;
+            elem_num++;
+        }
 
-        uint16_t value;
-        MAMEJPEG_CHECK( mameBitstream_readBits( context->input_stream, &value, 2, length ) );
+        if( 0 < bit_length  )
+        {
+            *has_data = true;
+
+            uint16_t huffman_value;
+            MAMEJPEG_CHECK( mameBitstream_readBits( context->input_stream, &huffman_value, 2, bit_length ) );
+            int16_t ac_coeff;
+            MAMEJPEG_CHECK( mameJpeg_calcDCValue( context, huffman_value, bit_length, &ac_coeff ) );
+
+            uint8_t zigzag_index = mameJpeg_getZigZagIndex( context, elem_num );
+            context->info.mcu_dct_coeffs[zigzag_index] = ac_coeff;
+
+            elem_num++;
+        }
     }
 
     return true;
@@ -695,14 +740,15 @@ bool mameJpeg_applyDCT( mameJpeg_context* context, bool is_forward )
     {
         for( int x = 0; x < 8; x++ )
         {
-            double tmp = context->info.work_mcu[y][0] * cos( 3.14 / 8 * 0 * ( x + 0.5 ) );
-            tmp += context->info.work_mcu[y][1] * cos( 3.14 / 8 * 1 * ( x + 0.5 ) );
-            tmp += context->info.work_mcu[y][2] * cos( 3.14 / 8 * 2 * ( x + 0.5 ) );
-            tmp += context->info.work_mcu[y][3] * cos( 3.14 / 8 * 3 * ( x + 0.5 ) );
-            tmp += context->info.work_mcu[y][4] * cos( 3.14 / 8 * 4 * ( x + 0.5 ) );
-            tmp += context->info.work_mcu[y][5] * cos( 3.14 / 8 * 5 * ( x + 0.5 ) );
-            tmp += context->info.work_mcu[y][6] * cos( 3.14 / 8 * 6 * ( x + 0.5 ) );
-            tmp += context->info.work_mcu[y][7] * cos( 3.14 / 8 * 7 * ( x + 0.5 ) );
+            uint8_t coeff_index_base = y * 8; 
+            double tmp = context->info.mcu_dct_coeffs[coeff_index_base + 0] * cos( 3.14 / 8 * 0 * ( x + 0.5 ) );
+            tmp += context->info.mcu_dct_coeffs[coeff_index_base + 1] * cos( 3.14 / 8 * 1 * ( x + 0.5 ) );
+            tmp += context->info.mcu_dct_coeffs[coeff_index_base + 2] * cos( 3.14 / 8 * 2 * ( x + 0.5 ) );
+            tmp += context->info.mcu_dct_coeffs[coeff_index_base + 3] * cos( 3.14 / 8 * 3 * ( x + 0.5 ) );
+            tmp += context->info.mcu_dct_coeffs[coeff_index_base + 4] * cos( 3.14 / 8 * 4 * ( x + 0.5 ) );
+            tmp += context->info.mcu_dct_coeffs[coeff_index_base + 5] * cos( 3.14 / 8 * 5 * ( x + 0.5 ) );
+            tmp += context->info.mcu_dct_coeffs[coeff_index_base + 6] * cos( 3.14 / 8 * 6 * ( x + 0.5 ) );
+            tmp += context->info.mcu_dct_coeffs[coeff_index_base + 7] * cos( 3.14 / 8 * 7 * ( x + 0.5 ) );
 
             res1[x][y] = tmp;
         }
@@ -721,7 +767,7 @@ bool mameJpeg_applyDCT( mameJpeg_context* context, bool is_forward )
             tmp += res1[y][6] * cos( 3.14 / 8 * 6 * ( x + 0.5 ) );
             tmp += res1[y][7] * cos( 3.14 / 8 * 7 * ( x + 0.5 ) );
 
-            context->info.work_mcu2[y][x] += ( tmp / 16 + 64 );
+            context->info.mcu_pixels[y * 8 + x] += ( tmp / 16 + 64 );
         }
     }
 
@@ -734,35 +780,34 @@ bool mameJpeg_applyInverseQunatize( mameJpeg_context* context, uint8_t compoent_
     return true;
 }
 
-bool mameJpeg_decodeMCU( mameJpeg_context* context, uint16_t ver_mcu_index, uint16_t hor_mcu_index )
+bool mameJpeg_clearDCTCoeffBuffer( mameJpeg_context* context )
+{
+    for( int i = 0; i < 64; i++ )
+    {
+        context->info.mcu_dct_coeffs[i] = 0.0;
+    }
+
+    return true;
+}
+
+bool mameJpeg_decodeMCU( mameJpeg_context* context )
 {
     MAMEJPEG_NULL_CHECK( context );
 
     for( int i = 0; i < context->info.component_num; i++ )
     {
-        for( int y = 0; y < 8; y++ )
-        {
-            for( int x = 0; x < 8; x ++ )
-            {
-                context->info.work_mcu[y][x] = 0.0;
-            }
-        }
+        bool has_dc_data = false;
+        bool has_ac_data = false;
+        MAMEJPEG_CHECK( mameJpeg_clearDCTCoeffBuffer( context ) );
+        MAMEJPEG_CHECK( mameJpeg_decodeDC( context, i ,&has_dc_data ) );
+        MAMEJPEG_CHECK( mameJpeg_decodeAC( context, i ,&has_ac_data ) );
 
-        MAMEJPEG_CHECK( mameJpeg_decodeDC( context, i ) );
-        MAMEJPEG_CHECK( mameJpeg_decodeAC( context, i ) );
-        MAMEJPEG_CHECK( mameJpeg_applyDCT( context, false ) );
-        MAMEJPEG_CHECK( mameJpeg_applyInverseQunatize( context, i ) );
-    }
-
-    for( int y = 0; y < 8; y++ )
-    {
-        for( int x = 0; x < 8; x++ )
+        if( has_dc_data || has_ac_data )
         {
-            uint16_t index = ( y +  8 * ver_mcu_index ) * context->info.width + 8 * hor_mcu_index + x;
-            context->work_buffer[ index ] = (uint8_t)(context->info.work_mcu2[y][x]);
+            MAMEJPEG_CHECK( mameJpeg_applyDCT( context, false ) );
+            MAMEJPEG_CHECK( mameJpeg_applyInverseQunatize( context, i ) );
         }
     }
-
 
     return true;
 }
@@ -771,7 +816,21 @@ bool mameJpeg_writeBuffer( mameJpeg_context* context )
 {
     for( uint16_t i = 0; i < 8 * context->info.width; i++ )
     {
-        mameBitstream_writeByte( context->output_stream, ((uint8_t*)context->work_buffer)[i] );
+        mameBitstream_writeByte( context->output_stream, context->line_buffer[i] );
+    }
+
+    return true;
+}
+
+bool mameJpeg_moveMCUToBuffer( mameJpeg_context* context, uint16_t hor_mcu_index, uint16_t ver_mcu_index )
+{
+    for( int y = 0; y < 8; y++ )
+    {
+        for( int x = 0; x < 8; x++ )
+        {
+            uint16_t index = y * context->info.width + 8 * hor_mcu_index + x;
+            context->line_buffer[ index ] = ( uint8_t )(context->info.mcu_pixels[y * 8 + x]);
+        }
     }
 
     return true;
@@ -785,7 +844,8 @@ bool mameJpeg_decodeImage( mameJpeg_context* context )
     {
         for( uint16_t hor_mcu_index = 0; hor_mcu_index < hor_mcu_num; hor_mcu_index++)
         {
-            mameJpeg_decodeMCU( context, ver_mcu_index, hor_mcu_index );
+            mameJpeg_decodeMCU( context );
+            mameJpeg_moveMCUToBuffer( context, hor_mcu_index, ver_mcu_index );
         }
 
         mameJpeg_writeBuffer( context );
