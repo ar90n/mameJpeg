@@ -289,9 +289,8 @@ typedef enum{
 } mameJpeg_marker;
 
 typedef struct {
-    void* work_buffer;
-    size_t work_buffer_length;
     uint8_t* line_buffer;
+    size_t line_buffer_length;
     mameBitstream_context input_stream[1];
     mameBitstream_context output_stream[1];
     mameJpeg_format format;
@@ -310,7 +309,6 @@ typedef struct {
             int huff_table_index[2];
             int prev_dc_value;
         } component [3];
-        uint8_t quant_table[4][64];
         struct {
             uint16_t offsets[16];
             struct {
@@ -321,6 +319,7 @@ typedef struct {
 
         double* mcu_dct_coeffs;
         double* mcu_pixels;
+        uint8_t quant_table[4][64];
     } info;
 } mameJpeg_context;
 
@@ -429,12 +428,10 @@ bool mameJpeg_setWorkBuffer( mameJpeg_context* context, void* work_buffer, size_
     MAMEJPEG_NULL_CHECK( work_buffer );
     MAMEJPEG_CHECK( 0 < work_buffer_length );
 
-    context->work_buffer = work_buffer;
-    context->work_buffer_length = work_buffer_length;
-
     context->info.mcu_dct_coeffs = (double*)work_buffer;
     context->info.mcu_pixels = context->info.mcu_dct_coeffs + 64;
     context->line_buffer = (uint8_t*)(context->info.mcu_pixels + 64);
+    context->line_buffer_length = work_buffer_length - sizeof(double) * 128;
     return true;
 }
 
