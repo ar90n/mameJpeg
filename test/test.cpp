@@ -484,7 +484,7 @@ TEST_CASE("Decode binary jpeg", "[sample]")
         printf("diff sum:%lf\n", diff_sum );
         CHECK( diff_sum < 1.0 );
 
-        mameJpeg_dumpHeader( context );
+        //mameJpeg_dumpHeader( context );
         //size_t size;
         //mameBitmap_encodeToFile( decode_image_buffer, 1024 * 1024, "./out.pgm", context->info.width, context->info.height, MAMEBITMAP_FORMAT_PGM_ASCII, 255, &size );
     }
