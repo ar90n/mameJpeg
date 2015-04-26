@@ -13,6 +13,7 @@ extern "C" {
 
 typedef bool (*mameJpeg_read_callback_ptr)( void* param, uint8_t* byte );
 typedef bool (*mameJpeg_write_callback_ptr)( void* param, uint8_t byte );
+typedef bool (*mameJpeg_rewind_callback_ptr)( void* param );
 
 typedef struct {
     void* buffer_ptr;
@@ -49,6 +50,16 @@ bool mameJpeg_output_to_memory_callback( void* param, uint8_t byte )
     return true;
 }
 
+bool mameJpeg_rewind_memory_callback( void* param )
+{
+    MAMEJPEG_NULL_CHECK( param );
+
+    mameJpeg_memory_callback_param *callback_param = (mameJpeg_memory_callback_param*)param;
+    callback_param->buffer_pos = 0;
+
+    return true;
+}
+
 bool mameJpeg_input_from_file_callback( void* param, uint8_t* byte )
 {
     MAMEJPEG_NULL_CHECK( param );
@@ -71,6 +82,16 @@ bool mameJpeg_output_to_file_callback( void* param, uint8_t byte )
     return ( n == 1 );
 }
 
+bool mameJpeg_rewind_file_callback( void* param )
+{
+    MAMEJPEG_NULL_CHECK( param );
+
+    FILE* fp = (FILE*)param;
+    rewind( fp );
+
+    return true;
+}
+
 typedef enum
 {
     MAMEBITSTREAM_READ,
@@ -82,20 +103,24 @@ typedef struct {
         mameJpeg_read_callback_ptr read;
         mameJpeg_write_callback_ptr write;
     } io_callback;
+    mameJpeg_rewind_callback_ptr rewind_callback;
     void* callback_param;
-    uint16_t cache;
+    uint32_t cache;
     int cache_use_bits;
     mameBitstream_mode mode;
 } mameBitstream_context;
 
 bool mameBitstream_input_initialize( mameBitstream_context* context,
                                      mameJpeg_read_callback_ptr read_callback,
+                                     mameJpeg_rewind_callback_ptr rewind_callback,
                                      void* callback_param )
 {
     MAMEJPEG_NULL_CHECK( context );
     MAMEJPEG_NULL_CHECK( read_callback );
+    MAMEJPEG_NULL_CHECK( rewind_callback );
 
     context->io_callback.read = read_callback;
+    context->rewind_callback = rewind_callback;
     context->callback_param = callback_param;
     context->cache = 0x0000;
     context->cache_use_bits = 0;
@@ -106,14 +131,17 @@ bool mameBitstream_input_initialize( mameBitstream_context* context,
 
 bool mameBitstream_output_initialize( mameBitstream_context* context,
                                       mameJpeg_write_callback_ptr write_callback,
+                                      mameJpeg_rewind_callback_ptr rewind_callback,
                                       void* callback_param )
 {
     MAMEJPEG_NULL_CHECK( context );
     MAMEJPEG_NULL_CHECK( write_callback );
+    MAMEJPEG_NULL_CHECK( rewind_callback );
 
     context->io_callback.write = write_callback;
+    context->rewind_callback = rewind_callback;
     context->callback_param = callback_param;
-    context->cache = 0x0000;
+    context->cache = 0x00000000;
     context->cache_use_bits = 0;
     context->mode = MAMEBITSTREAM_WRITE;
 
@@ -127,9 +155,17 @@ bool mameBitstream_tryReadIntoCache( mameBitstream_context* context )
     MAMEJPEG_CHECK( context->cache_use_bits < 8 );
     //( ( 8 * sizeof( context->cache ) ) - context->cache_use_bits < 8
 
-    uint8_t tmp;
-    MAMEJPEG_CHECK( context->io_callback.read( context->callback_param, &tmp ) );
-    context->cache |= ( tmp << ( 16 - 8 - context->cache_use_bits ) );
+    uint8_t prev_byte = 0;
+    uint8_t byte = 0;
+    do
+    {
+        prev_byte = byte;
+        MAMEJPEG_CHECK( context->io_callback.read( context->callback_param, &byte ) );
+    } while( byte == 0xff );
+    byte = ( prev_byte == 0xff && byte == 0x00 ) ? 0xff : byte;
+
+    uint32_t bit_shift = 8 * ( sizeof( context->cache ) - 1 ) - context->cache_use_bits;
+    context->cache |= ( byte << bit_shift );
     context->cache_use_bits += 8;
 
     return true;
@@ -141,7 +177,8 @@ bool mameBitstream_tryWriteFromCache( mameBitstream_context* context )
     MAMEJPEG_CHECK( context->mode == MAMEBITSTREAM_WRITE );
     MAMEJPEG_CHECK( 8 <= context->cache_use_bits );
 
-    uint8_t tmp = (uint8_t)( context->cache >> 8 );
+    uint32_t bit_shift = 8 * ( sizeof( context->cache ) - 1 );
+    uint8_t tmp = (uint8_t)( context->cache >> bit_shift );
     MAMEJPEG_CHECK( context->io_callback.write( context->callback_param, tmp ) );
 
     context->cache <<= 8;
@@ -155,7 +192,7 @@ bool mameBitstream_readBits( mameBitstream_context* context,
                              int buffer_length,
                              int bits )
 {
-    MAMEJPEG_NULL_CHECK( context);
+    MAMEJPEG_NULL_CHECK( context );
     MAMEJPEG_CHECK( context->mode == MAMEBITSTREAM_READ );
     MAMEJPEG_NULL_CHECK( buffer );
     MAMEJPEG_CHECK( bits <= ( 8 * buffer_length ) );
@@ -170,7 +207,7 @@ bool mameBitstream_readBits( mameBitstream_context* context,
             MAMEJPEG_CHECK( mameBitstream_tryReadIntoCache( context ) );
         }
 
-        uint8_t shift_width = 16 - read_bits;
+        uint8_t shift_width = 8 * sizeof( context->cache ) - read_bits;
         ((uint8_t*)buffer)[ buffer_pos ] = ( context->cache >> shift_width );
         buffer_pos--;
         bits -= read_bits;
@@ -184,7 +221,12 @@ bool mameBitstream_readBits( mameBitstream_context* context,
 
 bool mameBitstream_readByte( mameBitstream_context* context, uint8_t* byte )
 {
-    return mameBitstream_readBits( context, byte, 1, 8 );
+    MAMEJPEG_NULL_CHECK( context );
+    MAMEJPEG_NULL_CHECK( byte );
+    MAMEJPEG_CHECK( context->mode == MAMEBITSTREAM_READ );
+
+    MAMEJPEG_CHECK( context->io_callback.read( context->callback_param, byte ) );
+    return true;
 }
 
 bool mameBitstream_readTwoByte( mameBitstream_context* context, uint16_t* byte )
@@ -210,7 +252,7 @@ bool mameBitstream_writeBits( mameBitstream_context* context, void* buffer, int 
         uint8_t remain_bits = bits & 0x07;
         uint8_t write_bits = ( remain_bits != 0 ) ? remain_bits : 8;
         uint8_t cache_mask = ( 1 << write_bits ) - 1;
-        uint8_t shift_width = 16 - context->cache_use_bits - write_bits;
+        uint8_t shift_width = 8 * sizeof( context->cache ) - context->cache_use_bits - write_bits;
         context->cache |= ( (((uint8_t*)buffer)[ buffer_pos ] ) & cache_mask ) << shift_width;
         context->cache_use_bits += write_bits;
 
@@ -231,17 +273,17 @@ bool mameBitstream_writeByte( mameBitstream_context* context, uint8_t byte )
     return mameBitstream_writeBits( context, &byte, 8 );
 }
 
+bool mameBitstream_rewind( mameBitstream_context* context )
+{
+    MAMEJPEG_NULL_CHECK( context );
+
+    return context->rewind_callback( context->callback_param );
+}
+
 typedef enum {
     MAMEJPEG_ENCODE = 0,
     MAMEJPEG_DECODE = 1,
 } mameJpeg_mode;
-
-typedef enum {
-    MAMEJPEG_FORMAT_Y,
-    MAMEJPEG_FORMAT_YUV,
-    MAMEJPEG_FORMAT_RGB,
-    MAMEJPEG_FORMAT_UNKNOWN,
-} mameJpeg_format;
 
 typedef enum{
     MAMEJPEG_MARKER_SOI = 0xffd8,
@@ -250,6 +292,7 @@ typedef enum{
     MAMEJPEG_MARKER_DHT = 0xffc4,
     MAMEJPEG_MARKER_SOS = 0xffda,
     MAMEJPEG_MARKER_EOI = 0xffd9,
+    MAMEJPEG_MARKER_DRI = 0xffdd,
     MAMEJPEG_MARKER_UNKNOWN = 0x0000,
 } mameJpeg_marker;
 
@@ -258,7 +301,6 @@ typedef struct {
     size_t line_buffer_length;
     mameBitstream_context input_stream[1];
     mameBitstream_context output_stream[1];
-    mameJpeg_format format;
     mameJpeg_mode mode;
     int progress;
 
@@ -267,6 +309,7 @@ typedef struct {
         uint16_t width;
         uint16_t height;
         uint8_t component_num;
+        uint16_t restart_interval;
         struct {
             int hor_sampling;
             int ver_sampling;
@@ -290,24 +333,25 @@ typedef struct {
 
 bool mameJpeg_initialize( mameJpeg_context* context,
                           mameJpeg_read_callback_ptr input_callback,
+                          mameJpeg_rewind_callback_ptr input_rewind_callback,
                           void* input_callback_param,
                           mameJpeg_write_callback_ptr output_callback,
+                          mameJpeg_rewind_callback_ptr output_rewind_callback,
                           void* output_callback_param,
-                          mameJpeg_format format,
                           mameJpeg_mode mode )
 {
     MAMEJPEG_NULL_CHECK( context );
     MAMEJPEG_NULL_CHECK( input_callback );
+    MAMEJPEG_NULL_CHECK( input_rewind_callback );
     MAMEJPEG_NULL_CHECK( output_callback );
+    MAMEJPEG_NULL_CHECK( output_rewind_callback );
     MAMEJPEG_CHECK( mode == MAMEJPEG_ENCODE || mode == MAMEJPEG_DECODE );
 
-    mameBitstream_input_initialize( context->input_stream, input_callback, input_callback_param );
-    mameBitstream_output_initialize( context->output_stream, output_callback, output_callback_param );
-    context->info.component[0].prev_dc_value = 0;
-    context->info.component[1].prev_dc_value = 0;
-    context->info.component[2].prev_dc_value = 0;
-    context->format = format;
+    memset( context, 0x00, sizeof( mameJpeg_context ));
+    mameBitstream_input_initialize( context->input_stream, input_callback, input_rewind_callback, input_callback_param );
+    mameBitstream_output_initialize( context->output_stream, output_callback, output_rewind_callback, output_callback_param );
     context->mode = mode;
+
     return true;
 }
 
@@ -316,38 +360,18 @@ bool mameJpeg_decodeSOF0Segment( mameJpeg_context* context );
 bool mameJpeg_decodeDHTSegment( mameJpeg_context* context );
 bool mameJpeg_getNextMarker( mameJpeg_context* context, mameJpeg_marker* marker );
 
-bool mameJpeg_getBytePerPixel( mameJpeg_format format, int* byte_per_pixel )
-{
-    switch( format )
-    {
-        case MAMEJPEG_FORMAT_Y:
-        {
-            *byte_per_pixel = 1;
-        }break;
-        case MAMEJPEG_FORMAT_YUV: /* fall through */
-        case MAMEJPEG_FORMAT_RGB:
-        {
-            *byte_per_pixel = 3;
-        }break;
-        default:
-            return false;
-    }
-
-    return false;
-}
-
 bool mameJpeg_getImageInfo( mameJpeg_read_callback_ptr input_callback,
+                            mameJpeg_rewind_callback_ptr rewind_callback,
                             void* input_callback_param,
                             uint16_t* width,
                             uint16_t* height,
-                            uint8_t* component_num,
-                            size_t* work_buffer_size )
+                            uint8_t* component_num )
 {
     MAMEJPEG_NULL_CHECK( input_callback );
     MAMEJPEG_NULL_CHECK( input_callback_param );
 
     mameJpeg_context context[1];
-    mameBitstream_input_initialize( context->input_stream, input_callback, input_callback_param );
+    mameBitstream_input_initialize( context->input_stream, input_callback, rewind_callback, input_callback_param );
 
     mameJpeg_marker marker;
     while( mameJpeg_getNextMarker( context, &marker ) )
@@ -358,7 +382,7 @@ bool mameJpeg_getImageInfo( mameJpeg_read_callback_ptr input_callback,
         }
         else if( marker == MAMEJPEG_MARKER_DHT )
         {
-            MAMEJPEG_CHECK( mameJpeg_decodeDHTSegment( context ) );
+            MAMEJPEG_CHECK( mameJpeg_decodeDHTSegment( context ) );//TODO : eliminate here
         }
         else if( marker == MAMEJPEG_MARKER_SOS )
         {
@@ -381,24 +405,39 @@ bool mameJpeg_getImageInfo( mameJpeg_read_callback_ptr input_callback,
         *component_num = context->info.component_num;
     }
 
-    if( work_buffer_size != NULL )
-    {
-        *work_buffer_size = context->info.component_num * context->info.width * context->info.height ;
-        *work_buffer_size += context->info.component_num * 64;
-    }
-
     return true;
 }
 
-bool mameJpeg_getProgress( mameJpeg_context* context, int* progress )
+bool mameJpeg_getWorkBufferSize( mameJpeg_context* context, size_t* work_buffer_length )
 {
     MAMEJPEG_NULL_CHECK( context );
-    MAMEJPEG_NULL_CHECK( progress );
+    MAMEJPEG_NULL_CHECK( work_buffer_length );
 
-    *progress = context->progress;
+    mameJpeg_marker marker;
+    while( mameJpeg_getNextMarker( context, &marker ) )
+    {
+        if( marker == MAMEJPEG_MARKER_SOF0 )
+        {
+            MAMEJPEG_CHECK( mameJpeg_decodeSOF0Segment( context ) );
+        }
+        else if( marker == MAMEJPEG_MARKER_DHT )
+        {
+            MAMEJPEG_CHECK( mameJpeg_decodeDHTSegment( context ) );//TODO : eliminate here
+        }
+        else if( marker == MAMEJPEG_MARKER_SOS )
+        {
+            break;
+        }
+    }
 
+    *work_buffer_length = context->info.component_num * context->info.width * context->info.height ;
+    *work_buffer_length += context->info.component_num * 64;
+    *work_buffer_length += 1024 * 1024 * 4 ;
+
+    context->input_stream->rewind_callback( context->input_stream->callback_param );
     return true;
 }
+
 bool mameJpeg_setWorkBuffer( mameJpeg_context* context, void* work_buffer, size_t work_buffer_length )
 {
     MAMEJPEG_NULL_CHECK( work_buffer );
@@ -411,18 +450,28 @@ bool mameJpeg_setWorkBuffer( mameJpeg_context* context, void* work_buffer, size_
     return true;
 }
 
+bool mameJpeg_getProgress( mameJpeg_context* context, int* progress )
+{
+    MAMEJPEG_NULL_CHECK( context );
+    MAMEJPEG_NULL_CHECK( progress );
+
+    *progress = context->progress;
+
+    return true;
+}
+
 bool mameJpeg_getNextMarker( mameJpeg_context* context, mameJpeg_marker* marker )
 {
     MAMEJPEG_NULL_CHECK( context );
     MAMEJPEG_NULL_CHECK( marker );
 
     uint8_t prefix;
-    while( mameBitstream_readBits( context->input_stream, &prefix, 1, 8 ) )
+    while( mameBitstream_readByte( context->input_stream, &prefix ) )
     {
         if( prefix == 0xff )
         {
             uint8_t val;
-            MAMEJPEG_CHECK( mameBitstream_readBits( context->input_stream, &val, 1, 8 ) );
+            MAMEJPEG_CHECK( mameBitstream_readByte( context->input_stream, &val ) );
 
             *marker = (mameJpeg_marker)(( prefix << 8 ) | val);
             return true;
@@ -603,6 +652,8 @@ bool mameJpeg_getNextDecodedValue( mameJpeg_context* context, uint8_t ac_dc, uin
         }
     }
 
+    //TODO : detect marker.
+
     return false;
 }
 
@@ -780,7 +831,9 @@ bool mameJpeg_clearDCTCoeffBuffer( mameJpeg_context* context )
 
 bool mameJpeg_moveMCUToBuffer( mameJpeg_context* context, uint16_t hor_mcu_index, uint16_t ver_mcu_index, uint8_t compoent_index )
 {
-    if( context->format == MAMEJPEG_FORMAT_Y )
+    MAMEJPEG_CHECK( context->info.component_num == 1 || context->info.component_num == 3 );
+
+    if( context->info.component_num == 1 )
     {
         for( int y = 0; y < 8; y++ )
         {
@@ -791,38 +844,45 @@ bool mameJpeg_moveMCUToBuffer( mameJpeg_context* context, uint16_t hor_mcu_index
             }
         }
     }
-    else if( context->format == MAMEJPEG_FORMAT_YUV )
-    {
-        for( int y = 0; y < 8; y++ )
-        {
-            for( int x = 0; x < 8; x++ )
-            {
-                uint16_t index = 3 * ( y * context->info.width + 8 * hor_mcu_index + x ) + compoent_index;
-                context->line_buffer[ index ] = ( uint8_t )(context->info.mcu_pixels[y * 8 + x]);
-            }
-        }
-    }
-    else if( context->format == MAMEJPEG_FORMAT_RGB )
+    else
     {
         for( int y = 0; y < 8; y++ )
         {
             for( int x = 0; x < 8; x++ )
             {
                 double yuv_rgb_coeff[3][4] = { 
-                    { 1.0, 0.0, 1.13983, 0.0 },
-                    { 1.0, -0.39465, -0.58060, 128.0 },
-                    { 1.0, 2.03211, 0.0, 128.0 }
+                    { 1.0, 1.0, 1.0, 0.0 },
+                    { 0.0, -0.187324, 1.8556, 128.0 },
+                    { 1.5748, -0.468124, 0.0, 128.0 }
                 };
+                /*
+                double yuv_rgb_coeff[3][4] = { 
+                    { 1.0, 1.0, 1.0, 0.0 },
+                    { 1.0, 1.0, 1.0, 128.0 },
+                    { 1.0, 1.0, 1.0, 128.0 }
+                };
+                */
+                if( compoent_index == 3 )
+                {
+                    continue;
+                }
                 uint16_t index = 3 * ( y * context->info.width + 8 * hor_mcu_index + x );
-                context->line_buffer[ index + 0 ] = ( uint8_t )(yuv_rgb_coeff[compoent_index][0] * ( context->info.mcu_pixels[y * 8 + x] - yuv_rgb_coeff[compoent_index][3] ));
-                context->line_buffer[ index + 1 ] = ( uint8_t )(yuv_rgb_coeff[compoent_index][1] * ( context->info.mcu_pixels[y * 8 + x] - yuv_rgb_coeff[compoent_index][3] ));
-                context->line_buffer[ index + 2 ] = ( uint8_t )(yuv_rgb_coeff[compoent_index][2] * ( context->info.mcu_pixels[y * 8 + x] - yuv_rgb_coeff[compoent_index][3] ));
+                double tmpR = context->line_buffer[ index + 0 ] + yuv_rgb_coeff[compoent_index][0] * ( context->info.mcu_pixels[y * 8 + x] - yuv_rgb_coeff[compoent_index][3] );
+                tmpR = ( 255.0 < tmpR ) ? 255.0 : ( ( tmpR < 0 ) ? 0 : tmpR );
+                context->line_buffer[ index + 0 ] += (uint8_t) tmpR;
+
+                double tmpG = context->line_buffer[ index + 1 ] + yuv_rgb_coeff[compoent_index][1] * ( context->info.mcu_pixels[y * 8 + x] - yuv_rgb_coeff[compoent_index][3] );
+                printf("tmpG:%lf\n",tmpG);
+                tmpG = ( 255.0 < tmpG ) ? 255.0 : ( ( tmpG < 0 ) ? 0 : tmpG );
+                context->line_buffer[ index + 1 ] += (uint8_t) tmpG;
+
+                double tmpB = context->line_buffer[ index + 2 ] + yuv_rgb_coeff[compoent_index][2] * ( context->info.mcu_pixels[y * 8 + x] - yuv_rgb_coeff[compoent_index][3] );
+                tmpB = ( 255.0 < tmpB ) ? 255.0 : ( ( tmpB < 0 ) ? 0 : tmpB );
+                context->line_buffer[ index + 2 ] += (uint8_t) tmpB;
+
+                printf("%d %d %d %d %d %d %d %d\n", context->line_buffer[ index + 0 ], context->line_buffer[ index + 1 ], context->line_buffer[ index + 2 ], hor_mcu_index, ver_mcu_index, x, y, index  );
             }
         }
-    }
-    else
-    {
-        return false;
     }
 
     return true;
@@ -852,10 +912,21 @@ bool mameJpeg_decodeMCU( mameJpeg_context* context, uint16_t hor_mcu_index, uint
     return true;
 }
 
+bool mameJpeg_restartDecode( mameJpeg_context* context )
+{
+    MAMEJPEG_NULL_CHECK( context );
+
+    context->info.component[0].prev_dc_value = 0;
+    context->info.component[1].prev_dc_value = 0;
+    context->info.component[2].prev_dc_value = 0;
+    return true;
+}
+
 bool mameJpeg_writeBuffer( mameJpeg_context* context )
 {
-    for( uint16_t i = 0; i < 8 * context->info.width; i++ )
+    for( uint16_t i = 0; i < 8 * context->info.component_num * context->info.width; i++ )
     {
+        printf("%d %d\n", i, context->line_buffer[i] );
         mameBitstream_writeByte( context->output_stream, context->line_buffer[i] );
     }
 
@@ -864,6 +935,8 @@ bool mameJpeg_writeBuffer( mameJpeg_context* context )
 
 bool mameJpeg_decodeImage( mameJpeg_context* context )
 {
+    int restart_interval = context->info.restart_interval;
+
     uint16_t hor_mcu_num = context->info.width >> 3;
     uint16_t ver_mcu_num = context->info.width >> 3;
     for( uint16_t ver_mcu_index = 0; ver_mcu_index < ver_mcu_num; ver_mcu_index++ )
@@ -871,6 +944,13 @@ bool mameJpeg_decodeImage( mameJpeg_context* context )
         for( uint16_t hor_mcu_index = 0; hor_mcu_index < hor_mcu_num; hor_mcu_index++)
         {
             mameJpeg_decodeMCU( context, hor_mcu_index, ver_mcu_index );
+
+            restart_interval--;
+            if( restart_interval == 0 )
+            {
+                mameJpeg_restartDecode( context );
+                restart_interval = context->info.restart_interval;
+            }
         }
 
         mameJpeg_writeBuffer( context );
@@ -923,6 +1003,20 @@ bool mameJpeg_decodeEOISegment( mameJpeg_context* context )
     return true;
 }
 
+bool mameJpeg_decodeDRISegment( mameJpeg_context* context )
+{
+    MAMEJPEG_NULL_CHECK( context );
+    printf("call %s\n", __func__ );
+
+    uint16_t dri_size;
+    MAMEJPEG_CHECK( mameJpeg_getSegmentSize( context, &dri_size ) );
+    MAMEJPEG_CHECK( dri_size == 2 );
+
+    MAMEJPEG_CHECK( mameBitstream_readTwoByte( context->input_stream, &context->info.restart_interval ) );
+
+    return true;
+}
+
 bool mameJpeg_decodeUnknownSegment( mameJpeg_context* context )
 {
     MAMEJPEG_NULL_CHECK( context );
@@ -940,6 +1034,7 @@ struct {
     { MAMEJPEG_MARKER_DHT, mameJpeg_decodeDHTSegment },
     { MAMEJPEG_MARKER_SOS, mameJpeg_decodeSOSSegment },
     { MAMEJPEG_MARKER_EOI, mameJpeg_decodeEOISegment },
+    { MAMEJPEG_MARKER_DRI, mameJpeg_decodeDRISegment },
     { MAMEJPEG_MARKER_UNKNOWN, mameJpeg_decodeUnknownSegment },
 };
 
@@ -1023,7 +1118,7 @@ bool mameJpeg_dumpHeader( mameJpeg_context* context )
                     continue;
                 }
 
-                printf("  %d bit code\n", i);
+                printf("  %d bit code ( %d - %d )\n", i, from_index,context->info.huff_table[ac_dc_index][luma_chroma_index].offsets[i] );
                 for( int j = from_index ; j< context->info.huff_table[ac_dc_index][luma_chroma_index].offsets[i]; j++ )
                 {
                     printf("    %x - %d\n",context->info.huff_table[ac_dc_index][luma_chroma_index].elements[j].code, context->info.huff_table[ac_dc_index][luma_chroma_index].elements[j].value );
