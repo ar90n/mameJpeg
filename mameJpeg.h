@@ -11,8 +11,12 @@ extern "C" {
 #define MAMEJPEG_NULL_CHECK( X )  MAMEJPEG_CHECK((X)!=NULL)
 #define MAMEJPEG_PROC_CHECK( LABEL, X ) do{ if( (X) == false ) goto LABEL; } while(0)
 
+#define MAMEJPEG_MAX( VAL1, VAL2 ) ( ( VAL1 < VAL2 ) ? VAL2 : VAL1 )
+#define MAMEJPEG_MIN( VAL1, VAL2 ) ( ( VAL1 < VAL2 ) ? VAL1 : VAL2 )
+#define MAMEJPEG_CLIP( VAL, LOW, HIGH ) MAMEJPEG_MIN( MAMEJPEG_MAX( VAL, LOW ), HIGH )
+
 typedef bool (*mameJpeg_read_callback_ptr)( void* param, uint8_t* byte );
-typedef bool (*mameJpeg_write_callback_ptr)( void* param, uint8_t byte );
+typedef bool (*mameBitstream_write_callback_ptr)( void* param, uint8_t byte );
 typedef bool (*mameJpeg_rewind_callback_ptr)( void* param );
 
 typedef struct {
@@ -77,7 +81,7 @@ bool mameJpeg_output_to_file_callback( void* param, uint8_t byte )
     MAMEJPEG_NULL_CHECK( param );
 
     FILE* fp = (FILE*)param;
-    size_t n = fread( &byte, 1, 1, fp );
+    size_t n = fwrite( &byte, 1, 1, fp );
 
     return ( n == 1 );
 }
@@ -101,7 +105,7 @@ typedef enum
 typedef struct {
     union {
         mameJpeg_read_callback_ptr read;
-        mameJpeg_write_callback_ptr write;
+        mameBitstream_write_callback_ptr write;
     } io_callback;
     mameJpeg_rewind_callback_ptr rewind_callback;
     void* callback_param;
@@ -130,7 +134,7 @@ bool mameBitstream_input_initialize( mameBitstream_context* context,
 }
 
 bool mameBitstream_output_initialize( mameBitstream_context* context,
-                                      mameJpeg_write_callback_ptr write_callback,
+                                      mameBitstream_write_callback_ptr write_callback,
                                       mameJpeg_rewind_callback_ptr rewind_callback,
                                       void* callback_param )
 {
@@ -181,6 +185,12 @@ bool mameBitstream_tryWriteFromCache( mameBitstream_context* context )
     uint8_t tmp = (uint8_t)( context->cache >> bit_shift );
     MAMEJPEG_CHECK( context->io_callback.write( context->callback_param, tmp ) );
 
+    if( tmp == 0xff )
+    {
+        uint8_t tmp = 0x00;
+        MAMEJPEG_CHECK( context->io_callback.write( context->callback_param, tmp ) );
+    }
+
     context->cache <<= 8;
     context->cache_use_bits -= 8;
 
@@ -229,7 +239,7 @@ bool mameBitstream_readByte( mameBitstream_context* context, uint8_t* byte )
     return true;
 }
 
-bool mameBitstream_readTwoByte( mameBitstream_context* context, uint16_t* byte )
+bool mameBitstream_readTwoBytes( mameBitstream_context* context, uint16_t* byte )
 {
     uint8_t high;
     MAMEJPEG_CHECK( mameBitstream_readByte( context, &high ) );
@@ -241,6 +251,40 @@ bool mameBitstream_readTwoByte( mameBitstream_context* context, uint16_t* byte )
 }
 
 bool mameBitstream_writeBits( mameBitstream_context* context, void* buffer, int bits )
+{
+    MAMEJPEG_NULL_CHECK( context );
+    MAMEJPEG_CHECK( context->mode == MAMEBITSTREAM_WRITE );
+    MAMEJPEG_NULL_CHECK( buffer );
+    assert( bits % 8 == 0 );
+
+    if( 0 < context->cache_use_bits )
+    {
+        if( 8 < context->cache_use_bits )
+        {
+            MAMEJPEG_CHECK( mameBitstream_tryWriteFromCache( context ) );
+        }
+
+        if( 0 < context->cache_use_bits )
+        {
+            uint32_t bit_shift = 8 * ( sizeof( context->cache ) - 1 );
+            uint8_t tmp = (uint8_t)( context->cache >> bit_shift );
+            MAMEJPEG_CHECK( context->io_callback.write( context->callback_param, tmp ) );
+            context->cache = 0;
+            context->cache_use_bits = 0;
+        }
+    }
+
+    int buffer_pos = ( bits - 1 ) >> 3;
+    while( 0 < bits )
+    {
+        MAMEJPEG_CHECK( context->io_callback.write( context->callback_param, *((uint8_t*)buffer) ) );
+        bits -= 8;
+    }
+
+    return ( bits == 0 );
+}
+
+bool mameBitstream_writeCompressedImageBits( mameBitstream_context* context, void* buffer, int bits )
 {
     MAMEJPEG_NULL_CHECK( context );
     MAMEJPEG_CHECK( context->mode == MAMEBITSTREAM_WRITE );
@@ -268,9 +312,45 @@ bool mameBitstream_writeBits( mameBitstream_context* context, void* buffer, int 
     return ( bits == 0 );
 }
 
+bool mameBitstream_flushCompressedImageBits( mameBitstream_context* context )
+{
+    MAMEJPEG_NULL_CHECK( context );
+
+    while( 8 < context->cache_use_bits )
+    {
+        MAMEJPEG_CHECK( mameBitstream_tryWriteFromCache( context ) );
+    }
+
+    if( 0 < context->cache_use_bits )
+    {
+        uint32_t bit_shift = 8 * ( sizeof( context->cache ) - 1 );
+        uint8_t tmp = (uint8_t)( context->cache >> bit_shift );
+        MAMEJPEG_CHECK( context->io_callback.write( context->callback_param, tmp ) );
+    }
+ 
+    context->cache = 0;
+    context->cache_use_bits = 0;
+
+    return true;
+}
+
 bool mameBitstream_writeByte( mameBitstream_context* context, uint8_t byte )
 {
-    return mameBitstream_writeBits( context, &byte, 8 );
+    MAMEJPEG_NULL_CHECK( context );
+    MAMEJPEG_CHECK( context->mode == MAMEBITSTREAM_WRITE );
+
+    MAMEJPEG_CHECK( context->io_callback.write( context->callback_param, byte ) );
+    return true;
+}
+
+bool mameBitstream_writeTwoBytes( mameBitstream_context* context, uint16_t two_bytes )
+{
+    uint8_t high = two_bytes >> 8;
+    MAMEJPEG_CHECK( mameBitstream_writeByte( context, high ) );
+    uint8_t low = two_bytes & 0xff;
+    MAMEJPEG_CHECK( mameBitstream_writeByte( context, low ) );
+
+    return true ;
 }
 
 bool mameBitstream_rewind( mameBitstream_context* context )
@@ -281,9 +361,17 @@ bool mameBitstream_rewind( mameBitstream_context* context )
 }
 
 typedef enum {
-    MAMEJPEG_ENCODE = 0,
-    MAMEJPEG_DECODE = 1,
+    MAMEJPEG_MODE_ENCODE = 0,
+    MAMEJPEG_MODE_DECODE = 1,
 } mameJpeg_mode;
+
+typedef enum {
+    MAMEJPEG_FORMAT_YCBCR_444 = 0,
+    MAMEJPEG_FORMAT_YCBCR_422v = 1,
+    MAMEJPEG_FORMAT_YCBCR_422h = 2,
+    MAMEJPEG_FORMAT_YCBCR_420 = 3,
+    MAMEJPEG_FORMAT_Y_444 = 4,
+} mameJpeg_format;
 
 typedef enum{
     MAMEJPEG_MARKER_SOI = 0xffd8,
@@ -295,6 +383,11 @@ typedef enum{
     MAMEJPEG_MARKER_DRI = 0xffdd,
     MAMEJPEG_MARKER_UNKNOWN = 0x0000,
 } mameJpeg_marker;
+
+typedef struct {
+    uint16_t code;
+    uint8_t value;
+}huffman_element;
 
 typedef struct {
     uint8_t* line_buffer;
@@ -311,23 +404,22 @@ typedef struct {
         uint8_t component_num;
         uint16_t restart_interval;
         struct {
-            int hor_sampling;
-            int ver_sampling;
-            int quant_table_index;
-            int huff_table_index[2];
+            uint8_t hor_sampling;
+            uint8_t ver_sampling;
+            uint8_t quant_table_index;
+            uint8_t huff_table_index[2];
             int prev_dc_value;
         } component [3];
         struct {
-            uint16_t offsets[16];
-            struct {
-                uint16_t code;
-                uint8_t value;
-            } elements[512];
+            uint16_t offsets[17];
+            huffman_element* elements;
         } huff_table[2][2];
 
-        double* mcu_dct_coeffs;
+        uint8_t* quant_table[4];
+
+        double* dct_work_buffer;
         double* mcu_pixels;
-        uint8_t quant_table[4][64];
+
     } info;
 } mameJpeg_context;
 
@@ -335,7 +427,7 @@ bool mameJpeg_initialize( mameJpeg_context* context,
                           mameJpeg_read_callback_ptr input_callback,
                           mameJpeg_rewind_callback_ptr input_rewind_callback,
                           void* input_callback_param,
-                          mameJpeg_write_callback_ptr output_callback,
+                          mameBitstream_write_callback_ptr output_callback,
                           mameJpeg_rewind_callback_ptr output_rewind_callback,
                           void* output_callback_param,
                           mameJpeg_mode mode )
@@ -345,7 +437,7 @@ bool mameJpeg_initialize( mameJpeg_context* context,
     MAMEJPEG_NULL_CHECK( input_rewind_callback );
     MAMEJPEG_NULL_CHECK( output_callback );
     MAMEJPEG_NULL_CHECK( output_rewind_callback );
-    MAMEJPEG_CHECK( mode == MAMEJPEG_ENCODE || mode == MAMEJPEG_DECODE );
+    MAMEJPEG_CHECK( mode == MAMEJPEG_MODE_ENCODE || mode == MAMEJPEG_MODE_DECODE );
 
     memset( context, 0x00, sizeof( mameJpeg_context ));
     mameBitstream_input_initialize( context->input_stream, input_callback, input_rewind_callback, input_callback_param );
@@ -379,10 +471,6 @@ bool mameJpeg_getImageInfo( mameJpeg_read_callback_ptr input_callback,
         if( marker == MAMEJPEG_MARKER_SOF0 )
         {
             MAMEJPEG_CHECK( mameJpeg_decodeSOF0Segment( context ) );
-        }
-        else if( marker == MAMEJPEG_MARKER_DHT )
-        {
-            MAMEJPEG_CHECK( mameJpeg_decodeDHTSegment( context ) );//TODO : eliminate here
         }
         else if( marker == MAMEJPEG_MARKER_SOS )
         {
@@ -422,7 +510,7 @@ bool mameJpeg_getWorkBufferSize( mameJpeg_context* context, size_t* work_buffer_
         }
         else if( marker == MAMEJPEG_MARKER_DHT )
         {
-            MAMEJPEG_CHECK( mameJpeg_decodeDHTSegment( context ) );//TODO : eliminate here
+            MAMEJPEG_CHECK( mameJpeg_decodeDHTSegment( context ) );
         }
         else if( marker == MAMEJPEG_MARKER_SOS )
         {
@@ -438,15 +526,40 @@ bool mameJpeg_getWorkBufferSize( mameJpeg_context* context, size_t* work_buffer_
     return true;
 }
 
+
+
+
+
+
 bool mameJpeg_setWorkBuffer( mameJpeg_context* context, void* work_buffer, size_t work_buffer_length )
 {
     MAMEJPEG_NULL_CHECK( work_buffer );
     MAMEJPEG_CHECK( 0 < work_buffer_length );
 
-    context->info.mcu_dct_coeffs = (double*)work_buffer;
-    context->info.mcu_pixels = context->info.mcu_dct_coeffs + 64;
-    context->line_buffer = (uint8_t*)(context->info.mcu_pixels + 3 * 64);
-    context->line_buffer_length = work_buffer_length - sizeof(double) * 128;
+    context->info.dct_work_buffer = (double*)work_buffer;
+    context->info.mcu_pixels = context->info.dct_work_buffer + 64;
+
+    context->info.huff_table[0][0].elements = (huffman_element*)(context->info.mcu_pixels + 4 * 3 * 64);
+    context->info.huff_table[0][1].elements = context->info.huff_table[0][0].elements + 2048;
+    context->info.huff_table[1][0].elements = context->info.huff_table[0][1].elements + 2048;
+    context->info.huff_table[1][1].elements = context->info.huff_table[1][0].elements + 2048;
+
+    if( context->mode == MAMEJPEG_MODE_DECODE )
+    {
+        context->info.quant_table[0] = (uint8_t*)( context->info.huff_table[1][1].elements + 2048 );
+        context->info.quant_table[1] = context->info.quant_table[0] + 64;
+        context->info.quant_table[2] = context->info.quant_table[1] + 64;
+        context->info.quant_table[3] = context->info.quant_table[2] + 64;
+
+        context->line_buffer = context->info.quant_table[3] + 64;
+        context->line_buffer_length = work_buffer_length - sizeof(double) * 128;
+    }
+    else
+    {
+        context->line_buffer = (uint8_t*)( context->info.huff_table[1][1].elements + 4 * 3 * 64);
+        context->line_buffer_length = work_buffer_length - sizeof(double) * 128;
+    }
+
     return true;
 }
 
@@ -489,7 +602,7 @@ bool mameJpeg_getSegmentSize( mameJpeg_context* context, uint16_t* size )
     MAMEJPEG_NULL_CHECK( size );
 
     uint16_t whole_size;
-    MAMEJPEG_CHECK( mameBitstream_readTwoByte( context->input_stream, &whole_size) );
+    MAMEJPEG_CHECK( mameBitstream_readTwoBytes( context->input_stream, &whole_size) );
     *size = whole_size - 2;
 
     return true;
@@ -498,14 +611,12 @@ bool mameJpeg_getSegmentSize( mameJpeg_context* context, uint16_t* size )
 bool mameJpeg_decodeSOISegment( mameJpeg_context* context )
 {
     MAMEJPEG_NULL_CHECK( context );
-    printf("call %s\n", __func__ );
     return true;
 }
 
 bool mameJpeg_decodeDQTSegment( mameJpeg_context* context )
 {
     MAMEJPEG_NULL_CHECK( context );
-    printf("call %s\n", __func__ );
 
     uint16_t dqt_size;
     MAMEJPEG_CHECK( mameJpeg_getSegmentSize( context, &dqt_size ) );
@@ -528,15 +639,14 @@ bool mameJpeg_decodeDQTSegment( mameJpeg_context* context )
 bool mameJpeg_decodeSOF0Segment( mameJpeg_context* context )
 {
     MAMEJPEG_NULL_CHECK( context );
-    printf("call %s\n", __func__ );
     
     uint16_t sof0_size;
     MAMEJPEG_CHECK( mameJpeg_getSegmentSize( context, &sof0_size ) );
     MAMEJPEG_CHECK( ( ( sof0_size - 6 ) % 3 ) == 0 );
 
     MAMEJPEG_CHECK( mameBitstream_readByte( context->input_stream, &(context->info.accuracy) ) );
-    MAMEJPEG_CHECK( mameBitstream_readTwoByte( context->input_stream, &(context->info.height) ) );
-    MAMEJPEG_CHECK( mameBitstream_readTwoByte( context->input_stream, &(context->info.width) ) );
+    MAMEJPEG_CHECK( mameBitstream_readTwoBytes( context->input_stream, &(context->info.height) ) );
+    MAMEJPEG_CHECK( mameBitstream_readTwoBytes( context->input_stream, &(context->info.width) ) );
     MAMEJPEG_CHECK( mameBitstream_readByte( context->input_stream, &(context->info.component_num) ) );
     MAMEJPEG_CHECK( context->info.component_num < 4 );
 
@@ -563,7 +673,6 @@ bool mameJpeg_decodeSOF0Segment( mameJpeg_context* context )
 bool mameJpeg_decodeDHTSegment( mameJpeg_context* context )
 {
     MAMEJPEG_NULL_CHECK( context );
-    printf("call %s\n", __func__ );
 
     uint16_t dht_size;
     MAMEJPEG_CHECK( mameJpeg_getSegmentSize( context, &dht_size ) );
@@ -583,20 +692,27 @@ bool mameJpeg_decodeDHTSegment( mameJpeg_context* context )
         context->info.huff_table[ac_dc][luma_chroma].offsets[i] = total_codes;
         for( int j = 0; j < num_of_codes; j++ )
         {
-            context->info.huff_table[ac_dc][luma_chroma].elements[ total_codes + j ].code = code;
+            if( context->info.huff_table[ac_dc][luma_chroma].elements != NULL )
+            {
+                context->info.huff_table[ac_dc][luma_chroma].elements[ total_codes + j ].code = code;
+            }
             code++;
         }
 
         code <<= 1;
         total_codes += num_of_codes;
     }
+    context->info.huff_table[ac_dc][luma_chroma].offsets[16] = total_codes;
     MAMEJPEG_CHECK( 17 + total_codes == dht_size );
 
     for( int i = 0; i < total_codes; i++ )
     {
         uint8_t zero_length;
         MAMEJPEG_CHECK( mameBitstream_readByte( context->input_stream, &zero_length ) );
-        context->info.huff_table[ac_dc][luma_chroma].elements[ i ].value = zero_length;
+        if( context->info.huff_table[ac_dc][luma_chroma].elements != NULL )
+        {
+            context->info.huff_table[ac_dc][luma_chroma].elements[ i ].value = zero_length;
+        }
     }
 
     return true;
@@ -607,9 +723,9 @@ bool mameJpeg_readImageData( mameJpeg_context* context, void* buffer, int buffer
     return mameBitstream_readBits( context->input_stream, buffer, buffer_length, bits );
 }
 
-bool mameJpeg_writeImageData( mameJpeg_context* context, void* buffer, int bits )
+bool mameBitstream_writeImageData( mameJpeg_context* context, void* buffer, int bits )
 {
-    return mameBitstream_writeBits( context->output_stream, buffer, bits );
+    return mameBitstream_writeCompressedImageBits( context->output_stream, buffer, bits );
 }
 
 bool mameJpeg_decodeHuffmanCode( mameJpeg_context* context, uint8_t ac_dc, uint8_t table_index, uint16_t code, uint8_t code_length, uint8_t* value )
@@ -675,7 +791,7 @@ bool mameJpeg_decodeDC( mameJpeg_context* context, uint8_t component_index, bool
     MAMEJPEG_CHECK( mameJpeg_getNextDecodedValue( context, 0, component_index, &length ) );
     if( length == 0 )
     {
-        context->info.mcu_dct_coeffs[0] = context->info.component[ component_index ].prev_dc_value;
+        context->info.dct_work_buffer[0] = context->info.component[ component_index ].prev_dc_value;
         *has_data = false;
         return true;
     }
@@ -688,7 +804,7 @@ bool mameJpeg_decodeDC( mameJpeg_context* context, uint8_t component_index, bool
     MAMEJPEG_CHECK( mameJpeg_calcDCValue( context, huffman_dc_value, length, &diff_value ) );
 
     context->info.component[ component_index ].prev_dc_value += diff_value;
-    context->info.mcu_dct_coeffs[0] = context->info.component[ component_index ].prev_dc_value;
+    context->info.dct_work_buffer[0] = context->info.component[ component_index ].prev_dc_value;
     return true;
 }
 
@@ -728,7 +844,7 @@ bool mameJpeg_decodeAC( mameJpeg_context* context, uint8_t component_index, bool
         for( uint8_t i = 0; i < zero_run_length; i++ )
         {
             uint8_t zigzag_index = mameJpeg_getZigZagIndex( context, elem_num );
-            context->info.mcu_dct_coeffs[zigzag_index] = 0;
+            context->info.dct_work_buffer[zigzag_index] = 0;
             elem_num++;
         }
 
@@ -742,7 +858,7 @@ bool mameJpeg_decodeAC( mameJpeg_context* context, uint8_t component_index, bool
             MAMEJPEG_CHECK( mameJpeg_calcDCValue( context, huffman_value, bit_length, &ac_coeff ) );
 
             uint8_t zigzag_index = mameJpeg_getZigZagIndex( context, elem_num );
-            context->info.mcu_dct_coeffs[zigzag_index] = ac_coeff;
+            context->info.dct_work_buffer[zigzag_index] = ac_coeff;
 
             elem_num++;
         }
@@ -751,81 +867,111 @@ bool mameJpeg_decodeAC( mameJpeg_context* context, uint8_t component_index, bool
     return true;
 }
 
-bool mameJpeg_applyDCT( mameJpeg_context* context, int component_index, bool is_forward )
+bool mameJpeg_applyDCT( mameJpeg_context* context, bool is_forward )
 {
     MAMEJPEG_NULL_CHECK( context );
 
 #if 0
     for( int i = 0; i < 64; i++ )
     {
-        printf("%8.3f%c", context->info.mcu_dct_coeffs[i] , ( ( i + 1 ) % 8 == 0 ) ? '\n' : ' ' );
+        printf("%8.3f%c", context->info.dct_work_buffer[i] , ( ( i + 1 ) % 8 == 0 ) ? '\n' : ' ' );
     }
     printf("\n" );
 #endif
 
-    double res1[8][8];
-    for( int y = 0; y < 8; y++ )
+    if( is_forward )
     {
-        for( int x = 0; x < 8; x++ )
+        double res1[8][8];
+        for( int y = 0; y < 8; y++ )
         {
-            uint8_t coeff_index_base = y * 8; 
-            double tmp = ( 1.0 / 1.4142 ) * context->info.mcu_dct_coeffs[coeff_index_base + 0] * cos( 3.14 / 8 * 0 * ( x + 0.5 ) );
-            tmp += context->info.mcu_dct_coeffs[coeff_index_base + 1] * cos( 3.14 / 8 * 1 * ( x + 0.5 ) );
-            tmp += context->info.mcu_dct_coeffs[coeff_index_base + 2] * cos( 3.14 / 8 * 2 * ( x + 0.5 ) );
-            tmp += context->info.mcu_dct_coeffs[coeff_index_base + 3] * cos( 3.14 / 8 * 3 * ( x + 0.5 ) );
-            tmp += context->info.mcu_dct_coeffs[coeff_index_base + 4] * cos( 3.14 / 8 * 4 * ( x + 0.5 ) );
-            tmp += context->info.mcu_dct_coeffs[coeff_index_base + 5] * cos( 3.14 / 8 * 5 * ( x + 0.5 ) );
-            tmp += context->info.mcu_dct_coeffs[coeff_index_base + 6] * cos( 3.14 / 8 * 6 * ( x + 0.5 ) );
-            tmp += context->info.mcu_dct_coeffs[coeff_index_base + 7] * cos( 3.14 / 8 * 7 * ( x + 0.5 ) );
-
-            res1[x][y] = tmp;
-        }
-
-    }
-    for( int y = 0; y < 8; y++ )
-    {
-        for( int x = 0; x < 8; x++ )
-        {
-            double tmp = ( 1.0 / 1.4142 ) * res1[y][0] * cos( 3.14 / 8 * 0 * ( x + 0.5 ) );
-            tmp += res1[y][1] * cos( 3.14 / 8 * 1 * ( x + 0.5 ) );
-            tmp += res1[y][2] * cos( 3.14 / 8 * 2 * ( x + 0.5 ) );
-            tmp += res1[y][3] * cos( 3.14 / 8 * 3 * ( x + 0.5 ) );
-            tmp += res1[y][4] * cos( 3.14 / 8 * 4 * ( x + 0.5 ) );
-            tmp += res1[y][5] * cos( 3.14 / 8 * 5 * ( x + 0.5 ) );
-            tmp += res1[y][6] * cos( 3.14 / 8 * 6 * ( x + 0.5 ) );
-            tmp += res1[y][7] * cos( 3.14 / 8 * 7 * ( x + 0.5 ) );
-            tmp /= 4;
-            tmp += 128;
-
-            if( context->info.component_num == 1 )
+            for( int x = 0; x < 8; x++ )
             {
-                context->info.mcu_pixels[x * 8 + y] = tmp;
+                uint8_t coeff_index_base = y * 8; 
+                double tmp = context->info.dct_work_buffer[coeff_index_base + 0] * cos( 3.14 / 8 * x * ( 0 + 0.5 ) );
+                tmp += context->info.dct_work_buffer[coeff_index_base + 1] * cos( 3.14 / 8 * x * ( 1 + 0.5 ) );
+                tmp += context->info.dct_work_buffer[coeff_index_base + 2] * cos( 3.14 / 8 * x * ( 2 + 0.5 ) );
+                tmp += context->info.dct_work_buffer[coeff_index_base + 3] * cos( 3.14 / 8 * x * ( 3 + 0.5 ) );
+                tmp += context->info.dct_work_buffer[coeff_index_base + 4] * cos( 3.14 / 8 * x * ( 4 + 0.5 ) );
+                tmp += context->info.dct_work_buffer[coeff_index_base + 5] * cos( 3.14 / 8 * x * ( 5 + 0.5 ) );
+                tmp += context->info.dct_work_buffer[coeff_index_base + 6] * cos( 3.14 / 8 * x * ( 6 + 0.5 ) );
+                tmp += context->info.dct_work_buffer[coeff_index_base + 7] * cos( 3.14 / 8 * x * ( 7 + 0.5 ) );
+                if( x == 0 )
+                {
+                    tmp /= 1.4142;
+                }
+                res1[x][y] = tmp;
             }
-            else
-            {
-                double yuv_rgb_coeff[3][4] = { 
-                    { 1.0, 1.0, 1.0, 0.0 },
-                    { 0.0, -0.344, 1.772, 128.0 },
-                    { 1.402, -0.714, 0.0, 128.0 }
-                };
 
-                uint16_t index = 3 * ( x * 8 + y );
-                if( component_index == 0 )
+        }
+        for( int y = 0; y < 8; y++ )
+        {
+            for( int x = 0; x < 8; x++ )
+            {
+                uint16_t dst_index = x * 8 + y;
+                double tmp = res1[y][0] * cos( 3.14 / 8 * x * ( 0 + 0.5 ) );
+                tmp += res1[y][1] * cos( 3.14 / 8 * x * ( 1 + 0.5 ) );
+                tmp += res1[y][2] * cos( 3.14 / 8 * x * ( 2 + 0.5 ) );
+                tmp += res1[y][3] * cos( 3.14 / 8 * x * ( 3 + 0.5 ) );
+                tmp += res1[y][4] * cos( 3.14 / 8 * x * ( 4 + 0.5 ) );
+                tmp += res1[y][5] * cos( 3.14 / 8 * x * ( 5 + 0.5 ) );
+                tmp += res1[y][6] * cos( 3.14 / 8 * x * ( 6 + 0.5 ) );
+                tmp += res1[y][7] * cos( 3.14 / 8 * x * ( 7 + 0.5 ) );
+                if( x == 0 )
                 {
-                    context->info.mcu_pixels[ index + 0 ] = yuv_rgb_coeff[component_index][0] * ( tmp - yuv_rgb_coeff[component_index][3] );
-                    context->info.mcu_pixels[ index + 1 ] = yuv_rgb_coeff[component_index][1] * ( tmp - yuv_rgb_coeff[component_index][3] );
-                    context->info.mcu_pixels[ index + 2 ] = yuv_rgb_coeff[component_index][2] * ( tmp - yuv_rgb_coeff[component_index][3] );
+                    tmp /= 1.4142;
                 }
-                else
-                {
-                    context->info.mcu_pixels[ index + 0 ] += yuv_rgb_coeff[component_index][0] * ( tmp - yuv_rgb_coeff[component_index][3] );
-                    context->info.mcu_pixels[ index + 1 ] += yuv_rgb_coeff[component_index][1] * ( tmp - yuv_rgb_coeff[component_index][3] );
-                    context->info.mcu_pixels[ index + 2 ] += yuv_rgb_coeff[component_index][2] * ( tmp - yuv_rgb_coeff[component_index][3] );
-                }
+                tmp /= 4;
+                context->info.dct_work_buffer[ dst_index ] = tmp;
             }
         }
     }
+    else
+    {
+        double res1[8][8];
+        for( int y = 0; y < 8; y++ )
+        {
+            for( int x = 0; x < 8; x++ )
+            {
+                uint8_t coeff_index_base = y * 8; 
+                double tmp = ( 1.0 / 1.4142 ) * context->info.dct_work_buffer[coeff_index_base + 0] * cos( 3.14 / 8 * 0 * ( x + 0.5 ) );
+                tmp += context->info.dct_work_buffer[coeff_index_base + 1] * cos( 3.14 / 8 * 1 * ( x + 0.5 ) );
+                tmp += context->info.dct_work_buffer[coeff_index_base + 2] * cos( 3.14 / 8 * 2 * ( x + 0.5 ) );
+                tmp += context->info.dct_work_buffer[coeff_index_base + 3] * cos( 3.14 / 8 * 3 * ( x + 0.5 ) );
+                tmp += context->info.dct_work_buffer[coeff_index_base + 4] * cos( 3.14 / 8 * 4 * ( x + 0.5 ) );
+                tmp += context->info.dct_work_buffer[coeff_index_base + 5] * cos( 3.14 / 8 * 5 * ( x + 0.5 ) );
+                tmp += context->info.dct_work_buffer[coeff_index_base + 6] * cos( 3.14 / 8 * 6 * ( x + 0.5 ) );
+                tmp += context->info.dct_work_buffer[coeff_index_base + 7] * cos( 3.14 / 8 * 7 * ( x + 0.5 ) );
 
+                res1[x][y] = tmp;
+            }
+        }
+        for( int y = 0; y < 8; y++ )
+        {
+            for( int x = 0; x < 8; x++ )
+            {
+                //uint16_t dst_index = y * 8 + x;
+                uint16_t dst_index = x * 8 + y;
+                double tmp = ( 1.0 / 1.4142 ) * res1[y][0] * cos( 3.14 / 8 * 0 * ( x + 0.5 ) );
+                tmp += res1[y][1] * cos( 3.14 / 8 * 1 * ( x + 0.5 ) );
+                tmp += res1[y][2] * cos( 3.14 / 8 * 2 * ( x + 0.5 ) );
+                tmp += res1[y][3] * cos( 3.14 / 8 * 3 * ( x + 0.5 ) );
+                tmp += res1[y][4] * cos( 3.14 / 8 * 4 * ( x + 0.5 ) );
+                tmp += res1[y][5] * cos( 3.14 / 8 * 5 * ( x + 0.5 ) );
+                tmp += res1[y][6] * cos( 3.14 / 8 * 6 * ( x + 0.5 ) );
+                tmp += res1[y][7] * cos( 3.14 / 8 * 7 * ( x + 0.5 ) );
+                tmp /= 4;
+                context->info.dct_work_buffer[ dst_index ] = tmp;
+            }
+        }
+    }
+
+#if 0
+    for( int i = 0; i < 64; i++ )
+    {
+        printf("%8.3f%c", context->info.dct_work_buffer[i] , ( ( i + 1 ) % 8 == 0 ) ? '\n' : ' ' );
+    }
+    printf("\n" );
+#endif
     return true;
 }
 
@@ -834,55 +980,81 @@ bool mameJpeg_applyInverseQunatize( mameJpeg_context* context, uint8_t component
     MAMEJPEG_NULL_CHECK( context );
 
     uint8_t table_index = context->info.component[ component_index ].quant_table_index;
-    for( int i = 0; i < ( 8 * 8 ); i++ )
-    {
-        uint8_t zigzag_index = mameJpeg_getZigZagIndex( context, i );
-        context->info.mcu_dct_coeffs[zigzag_index] *= context->info.quant_table[table_index][i];
-    }
-
-    return true;
-}
-
-bool mameJpeg_clearDCTCoeffBuffer( mameJpeg_context* context )
-{
     for( int i = 0; i < 64; i++ )
     {
-        context->info.mcu_dct_coeffs[i] = 0.0;
+        uint8_t zigzag_index = mameJpeg_getZigZagIndex( context, i );
+        context->info.dct_work_buffer[zigzag_index] *= context->info.quant_table[table_index][i];
     }
 
     return true;
 }
 
-#define MAMEJPEG_MAX( VAL1, VAL2 ) ( ( VAL1 < VAL2 ) ? VAL2 : VAL1 )
-#define MAMEJPEG_MIN( VAL1, VAL2 ) ( ( VAL1 < VAL2 ) ? VAL1 : VAL2 )
-#define MAMEJPEG_CLIP( VAL, LOW, HIGH ) MAMEJPEG_MIN( MAMEJPEG_MAX( VAL, LOW ), HIGH )
+double MAMEJPEG_YCBCR_TO_RGB_COEFF[3][4] = { 
+    { 1.0, 1.0, 1.0, 128.0 },
+    { 0.0, -0.344, 1.772, 0.0 },
+    { 1.402, -0.714, 0.0, 0.0 }
+};
+
+double MAMEJPEG_RGB_TO_YCBCR_COEFF[4][3] = { 
+    { 0.299, -0.169,  0.500 },
+    { 0.587, -0.331, -0.419 },
+    { 0.114,  0.500, -0.081 },
+    { -128 ,      0,      0},
+
+};
+
+bool mameJpeg_applyColorConvert( mameJpeg_context* context, uint16_t hor_block, uint16_t ver_block, uint8_t component_index )
+{
+    MAMEJPEG_NULL_CHECK( context );
+
+    int diff_hor_sampling = context->info.component[0].hor_sampling - context->info.component[ component_index ].hor_sampling;
+    int diff_ver_sampling = context->info.component[0].ver_sampling - context->info.component[ component_index ].ver_sampling;
+    int block_width = 8 * ( diff_hor_sampling + 1 );
+    int block_height = 8 * ( diff_ver_sampling + 1 );
+
+    int y_offset = 8 * ver_block;
+    int x_offset = 8 * hor_block;
+    int mcu_width = 8 * context->info.component[0].hor_sampling;
+
+    for( int i = 0; i < 64; i++ )
+    {
+        context->info.mcu_pixels[ i ] = 0.0;
+    }
+
+    for( int y = 0; y < block_height; y++ )
+    {
+        uint16_t dst_index = context->info.component_num * ( ( y + y_offset ) * mcu_width + x_offset );
+        for( int x = 0; x < block_width; x++ )
+        {
+            uint16_t src_index = 8 * ( y >> diff_ver_sampling ) + ( x >> diff_hor_sampling );
+            for( int i = 0; i < context->info.component_num; i++ )
+            {
+                context->info.mcu_pixels[ dst_index ] += MAMEJPEG_YCBCR_TO_RGB_COEFF[component_index][i] * ( context->info.dct_work_buffer[ src_index ] + MAMEJPEG_YCBCR_TO_RGB_COEFF[component_index][3] );
+                dst_index++;
+            }
+        }
+    }
+
+    return true;
+}
+
 bool mameJpeg_moveMCUToBuffer( mameJpeg_context* context, uint16_t hor_mcu_index, uint16_t ver_mcu_index )
 {
     MAMEJPEG_CHECK( context->info.component_num == 1 || context->info.component_num == 3 );
 
-    if( context->info.component_num == 1 )
+    uint16_t mcu_width = 8 * context->info.component[0].hor_sampling;
+    uint16_t mcu_height = 8 * context->info.component[0].ver_sampling;
+    for( uint16_t y = 0; y < mcu_height; y++ )
     {
-        for( int y = 0; y < 8; y++ )
+        uint16_t hor_bytes = context->info.component_num * mcu_width;
+        uint16_t src_index = y * hor_bytes;
+        uint16_t dst_index = context->info.component_num * ( y * context->info.width + mcu_width * hor_mcu_index );
+        for( uint16_t x = 0; x < hor_bytes; x++ )
         {
-            for( int x = 0; x < 8; x++ )
-            {
-                uint16_t index = y * context->info.width + 8 * hor_mcu_index + x;
-                context->line_buffer[ index ] = (uint8_t)MAMEJPEG_CLIP( context->info.mcu_pixels[y * 8 + x], 0.0, 255.0 );
-            }
-        }
-    }
-    else
-    {
-        for( int y = 0; y < 8; y++ )
-        {
-            for( int x = 0; x < 8; x++ )
-            {
-                uint16_t src_index = 3 * ( y * 8 + x );
-                uint16_t dst_index = 3 * ( y * context->info.width + 8 * hor_mcu_index + x );
-                context->line_buffer[ dst_index + 0 ] = (uint8_t)MAMEJPEG_CLIP(context->info.mcu_pixels[src_index + 0], 0.0, 255.0);
-                context->line_buffer[ dst_index + 1 ] = (uint8_t)MAMEJPEG_CLIP(context->info.mcu_pixels[src_index + 1], 0.0, 255.0);
-                context->line_buffer[ dst_index + 2 ] = (uint8_t)MAMEJPEG_CLIP(context->info.mcu_pixels[src_index + 2], 0.0, 255.0);
-            }
+            context->line_buffer[ dst_index ] = (uint8_t)MAMEJPEG_CLIP( context->info.mcu_pixels[ src_index ], 0.0, 255.0 );
+            context->info.mcu_pixels[ src_index ] = 0.0;
+            src_index++;
+            dst_index++;
         }
     }
 
@@ -893,22 +1065,30 @@ bool mameJpeg_decodeMCU( mameJpeg_context* context, uint16_t hor_mcu_index, uint
 {
     MAMEJPEG_NULL_CHECK( context );
 
-    for( int i = 0; i < context->info.component_num; i++ )
+    for( uint8_t i = 0; i < context->info.component_num; i++ )
     {
-        bool has_dc_data = false;
-        bool has_ac_data = false;
-        MAMEJPEG_CHECK( mameJpeg_clearDCTCoeffBuffer( context ) );
-        MAMEJPEG_CHECK( mameJpeg_decodeDC( context, i ,&has_dc_data ) );
-        MAMEJPEG_CHECK( mameJpeg_decodeAC( context, i ,&has_ac_data ) );
-
-        if( has_dc_data || has_ac_data )
+        uint16_t num_of_hor_8x8blocks = context->info.component[ i ].hor_sampling;
+        uint16_t num_of_ver_8x8blocks = context->info.component[ i ].ver_sampling;
+        for( uint16_t ver_8x8block_index = 0; ver_8x8block_index < num_of_ver_8x8blocks; ver_8x8block_index++ )
         {
-            MAMEJPEG_CHECK( mameJpeg_applyInverseQunatize( context, i ) );
-            MAMEJPEG_CHECK( mameJpeg_applyDCT( context, i, false ) );
+            for( uint16_t hor_8x8block_index = 0; hor_8x8block_index < num_of_hor_8x8blocks; hor_8x8block_index++ )
+            {
+                bool has_dc_data = false;
+                bool has_ac_data = false;
+                MAMEJPEG_CHECK( mameJpeg_decodeDC( context, i ,&has_dc_data ) );
+                MAMEJPEG_CHECK( mameJpeg_decodeAC( context, i ,&has_ac_data ) );
+
+                if( has_dc_data || has_ac_data )
+                {
+                    MAMEJPEG_CHECK( mameJpeg_applyInverseQunatize( context, i ) );
+                    MAMEJPEG_CHECK( mameJpeg_applyDCT( context, false ) );
+                    MAMEJPEG_CHECK( mameJpeg_applyColorConvert( context, hor_8x8block_index, ver_8x8block_index, i ) );
+                }
+            }
         }
     }
 
-    mameJpeg_moveMCUToBuffer( context, hor_mcu_index, ver_mcu_index );
+    MAMEJPEG_CHECK( mameJpeg_moveMCUToBuffer( context, hor_mcu_index, ver_mcu_index ) );
 
     return true;
 }
@@ -923,9 +1103,30 @@ bool mameJpeg_restartDecode( mameJpeg_context* context )
     return true;
 }
 
+bool mameJpeg_restartEncode( mameJpeg_context* context )
+{
+    MAMEJPEG_NULL_CHECK( context );
+
+    context->info.component[0].prev_dc_value = 0;
+    context->info.component[1].prev_dc_value = 0;
+    context->info.component[2].prev_dc_value = 0;
+    return true;
+}
+
+bool mameJpeg_getOutputBytes( mameJpeg_context* context, uint16_t* output_bytes )
+{
+    MAMEJPEG_NULL_CHECK( context );
+    MAMEJPEG_NULL_CHECK( output_bytes );
+
+    *output_bytes = context->info.component_num * 8 * context->info.component[0].ver_sampling * context->info.width;
+    return true;
+}
 bool mameJpeg_writeBuffer( mameJpeg_context* context )
 {
-    for( uint16_t i = 0; i < 8 * context->info.component_num * context->info.width; i++ )
+    uint16_t output_bytes = 0;
+    MAMEJPEG_CHECK( mameJpeg_getOutputBytes( context, &output_bytes ) );
+
+    for( uint16_t i = 0; i < output_bytes; i++ )
     {
         mameBitstream_writeByte( context->output_stream, context->line_buffer[i] );
     }
@@ -933,30 +1134,52 @@ bool mameJpeg_writeBuffer( mameJpeg_context* context )
     return true;
 }
 
+bool mameJpeg_getNumOfMCU( mameJpeg_context* context, uint16_t* hor_mcu_num, uint16_t* ver_mcu_num )
+{
+    MAMEJPEG_NULL_CHECK( context );
+    MAMEJPEG_NULL_CHECK( hor_mcu_num );
+    MAMEJPEG_NULL_CHECK( ver_mcu_num );
+
+    uint8_t mcu_width_bits = 3 + context->info.component[0].hor_sampling - 1;
+    uint8_t mcu_height_bits = 3 + context->info.component[0].ver_sampling - 1;
+    *hor_mcu_num = ( context->info.width + ( 1 << mcu_width_bits ) - 1 ) >> mcu_width_bits;
+    *ver_mcu_num = ( context->info.height + ( 1 << mcu_height_bits ) - 1 ) >> mcu_height_bits;
+
+    return true;
+}
+
 bool mameJpeg_decodeImage( mameJpeg_context* context )
 {
-    int restart_interval = context->info.restart_interval;
+    MAMEJPEG_NULL_CHECK( context );
 
-    uint16_t hor_mcu_num = context->info.width >> 3;
-    uint16_t ver_mcu_num = context->info.width >> 3;
+    bool useDRI = 0 < context->info.restart_interval;
+    uint16_t restart_interval = context->info.restart_interval;
+
+    uint16_t hor_mcu_num = 0;
+    uint16_t ver_mcu_num = 0;
+    MAMEJPEG_CHECK( mameJpeg_getNumOfMCU( context, &hor_mcu_num, &ver_mcu_num ) );
+
     for( uint16_t ver_mcu_index = 0; ver_mcu_index < ver_mcu_num; ver_mcu_index++ )
     {
         for( uint16_t hor_mcu_index = 0; hor_mcu_index < hor_mcu_num; hor_mcu_index++)
         {
-            mameJpeg_decodeMCU( context, hor_mcu_index, ver_mcu_index );
+            MAMEJPEG_CHECK( mameJpeg_decodeMCU( context, hor_mcu_index, ver_mcu_index ) );
 
-            restart_interval--;
-            if( restart_interval == 0 )
+            if( useDRI )
             {
-                mameJpeg_restartDecode( context );
-                restart_interval = context->info.restart_interval;
+                restart_interval--;
+                if( restart_interval == 0 )
+                {
+                    MAMEJPEG_CHECK( mameJpeg_restartDecode( context ) );
+                    restart_interval = context->info.restart_interval;
+                }
             }
         }
 
-        mameJpeg_writeBuffer( context );
+        MAMEJPEG_CHECK( mameJpeg_writeBuffer( context ) );
     }
 
-    //cache invalidate
+    /* cache invalidate */
     context->input_stream->cache = 0;
     context->input_stream->cache_use_bits = 0;
 
@@ -966,7 +1189,6 @@ bool mameJpeg_decodeImage( mameJpeg_context* context )
 bool mameJpeg_decodeSOSSegment( mameJpeg_context* context )
 {
     MAMEJPEG_NULL_CHECK( context );
-    printf("call %s\n", __func__ );
 
     uint16_t sos_size;
     MAMEJPEG_CHECK( mameJpeg_getSegmentSize( context, &sos_size ) );
@@ -999,20 +1221,18 @@ bool mameJpeg_decodeSOSSegment( mameJpeg_context* context )
 bool mameJpeg_decodeEOISegment( mameJpeg_context* context )
 {
     MAMEJPEG_NULL_CHECK( context );
-    printf("call %s\n", __func__ );
     return true;
 }
 
 bool mameJpeg_decodeDRISegment( mameJpeg_context* context )
 {
     MAMEJPEG_NULL_CHECK( context );
-    printf("call %s\n", __func__ );
 
     uint16_t dri_size;
     MAMEJPEG_CHECK( mameJpeg_getSegmentSize( context, &dri_size ) );
     MAMEJPEG_CHECK( dri_size == 2 );
 
-    MAMEJPEG_CHECK( mameBitstream_readTwoByte( context->input_stream, &context->info.restart_interval ) );
+    MAMEJPEG_CHECK( mameBitstream_readTwoBytes( context->input_stream, &context->info.restart_interval ) );
 
     return true;
 }
@@ -1020,7 +1240,6 @@ bool mameJpeg_decodeDRISegment( mameJpeg_context* context )
 bool mameJpeg_decodeUnknownSegment( mameJpeg_context* context )
 {
     MAMEJPEG_NULL_CHECK( context );
-    printf("call %s\n", __func__ );
     return true;
 }
 
@@ -1041,7 +1260,7 @@ struct {
 bool mameJpeg_decode( mameJpeg_context* context )
 {
     MAMEJPEG_NULL_CHECK( context );
-    MAMEJPEG_CHECK( context->mode == MAMEJPEG_DECODE );
+    MAMEJPEG_CHECK( context->mode == MAMEJPEG_MODE_DECODE );
 
     mameJpeg_marker marker;
     while( mameJpeg_getNextMarker( context, &marker ) )
@@ -1059,15 +1278,689 @@ bool mameJpeg_decode( mameJpeg_context* context )
     return true;
 }
 
-#if 0
-bool mameJpeg_Encode( mameJpeg_context* context )
+bool mameJpeg_encodeSOISegment( mameJpeg_context* context )
 {
-    MAMEJPEG_NULL_CHECK( context )
-    MAMEJPEG_CHECK( context->mode == MAMEJPEG_ENCODE )
+    MAMEJPEG_NULL_CHECK( context );
+
+    MAMEJPEG_CHECK( mameBitstream_writeTwoBytes( context->output_stream, MAMEJPEG_MARKER_SOI ) );
 
     return true;
 }
-#endif
+
+bool mameJpeg_encodeDQTSegment( mameJpeg_context* context )
+{
+    MAMEJPEG_NULL_CHECK( context );
+
+    MAMEJPEG_CHECK( mameBitstream_writeTwoBytes( context->output_stream, MAMEJPEG_MARKER_DQT ) );
+
+    uint8_t quant_table_num = 0;
+    for( int i = 0; i < 4; i++ )
+    {
+        quant_table_num += ( context->info.quant_table[i] != NULL ) ? 1 : 0;
+    }
+
+    uint16_t dqt_size = quant_table_num * 65 + 2;
+    MAMEJPEG_CHECK( mameBitstream_writeTwoBytes( context->output_stream, dqt_size ) );
+
+    for( uint8_t i = 0; i < quant_table_num; i++ )
+    {
+        MAMEJPEG_CHECK( mameBitstream_writeByte( context->output_stream, i ) );
+        for( uint8_t j = 0; j < 64; j++ )
+        {
+            MAMEJPEG_CHECK( mameBitstream_writeByte( context->output_stream, context->info.quant_table[i][j] ) );
+        }
+    }
+
+    return true;
+}
+
+bool mameJpeg_encodeSOF0Segment( mameJpeg_context* context )
+{
+    MAMEJPEG_NULL_CHECK( context );
+
+    MAMEJPEG_CHECK( mameBitstream_writeTwoBytes( context->output_stream, MAMEJPEG_MARKER_SOF0 ) );
+
+    uint16_t sfo0_size = 6 + context->info.component_num * 3 + 2;
+    MAMEJPEG_CHECK( mameBitstream_writeTwoBytes( context->output_stream, sfo0_size ) );
+
+    MAMEJPEG_CHECK( mameBitstream_writeByte( context->output_stream, context->info.accuracy ) );
+    MAMEJPEG_CHECK( mameBitstream_writeTwoBytes( context->output_stream, context->info.height ) );
+    MAMEJPEG_CHECK( mameBitstream_writeTwoBytes( context->output_stream, context->info.width ) );
+    MAMEJPEG_CHECK( mameBitstream_writeByte( context->output_stream, context->info.component_num ) );
+
+    for( uint8_t i = 0; i < context->info.component_num; i++ )
+    {
+        uint8_t component_index = i + 1;
+        MAMEJPEG_CHECK( mameBitstream_writeByte( context->output_stream, component_index ) );
+        uint8_t sampling = ( context->info.component[i].hor_sampling << 4 ) | context->info.component[i].ver_sampling;
+        MAMEJPEG_CHECK( mameBitstream_writeByte( context->output_stream, sampling ) );
+        MAMEJPEG_CHECK( mameBitstream_writeByte( context->output_stream, context->info.component[i].quant_table_index ) );
+    }
+
+    return true;
+}
+
+const uint8_t MAMEJPEG_DEFAULT_QUANT_TABLE[2][64] = {
+    {
+        /*
+        16,  11,  10,  16,  24,  40,  51,  61,
+        12,  12,  14,  19,  26,  58,  60,  55,
+        14,  13,  16,  24,  40,  57,  69,  56,
+        14,  17,  22,  29,  51,  87,  80,  62,
+        18,  22,  37,  56,  68, 109, 103,  77,
+        24,  35,  55,  64,  81, 104, 113,  92,
+        49,  64,  78,  87, 103, 121, 120, 101,
+        72,  92,  95,  98, 112, 100, 103,  99
+        */
+        1,  1, 1, 1, 1, 1, 1, 1,
+        1,  1, 1, 1, 1, 1, 1, 1,
+        1,  1, 1, 1, 1, 1, 1, 1,
+        1,  1, 1, 1, 1, 1, 1, 1,
+        1,  1, 1, 1, 1, 1, 1, 1,
+        1,  1, 1, 1, 1, 1, 1, 1,
+        1,  1, 1, 1, 1, 1, 1, 1,
+        1,  1, 1, 1, 1, 1, 1, 1
+    },
+    {
+        /*
+        17, 18, 24, 47, 99, 99, 99, 99,
+        18, 21, 26, 66, 99, 99, 99, 99,
+        24, 26, 56, 99, 99, 99, 99, 99,
+        47, 66, 99, 99, 99, 99, 99, 99,
+        99, 99, 99, 99, 99, 99, 99, 99,
+        99, 99, 99, 99, 99, 99, 99, 99,
+        99, 99, 99, 99, 99, 99, 99, 99,
+        99, 99, 99, 99, 99, 99, 99, 99
+        */
+        1,  1, 1, 1, 1, 1, 1, 1,
+        1,  1, 1, 1, 1, 1, 1, 1,
+        1,  1, 1, 1, 1, 1, 1, 1,
+        1,  1, 1, 1, 1, 1, 1, 1,
+        1,  1, 1, 1, 1, 1, 1, 1,
+        1,  1, 1, 1, 1, 1, 1, 1,
+        1,  1, 1, 1, 1, 1, 1, 1,
+        1,  1, 1, 1, 1, 1, 1, 1
+    }
+};
+
+const uint8_t MAMEJPEG_DEFAULT_HUFFMAN_CODE_BITS[2][2][16] = {
+    {
+        { 0, 1, 5, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0 },
+        { 0, 3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0 },
+    },
+    {
+        { 0, 2, 1, 3, 3, 2, 4, 3, 5, 5, 4, 4, 0, 0, 1, 0x7d },
+        { 0, 2, 1, 2, 4, 4, 3, 4, 7, 5, 4, 4, 0, 1, 2, 0x77 },
+    }
+};
+
+const uint8_t MAMEJPEG_DEFAULT_DC_LUMA_HUFFMAN_CODE_VALUE[] = {
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11
+};
+
+const uint8_t MAMEJPEG_DEFAULT_DC_CHROMA_HUFFMAN_CODE_VALUE[] = {
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11
+};
+
+const uint8_t MAMEJPEG_DEFAULT_AC_LUMA_HUFFMAN_CODE_VALUE[] = {
+    0x01, 0x02, 0x03, 0x00, 0x04, 0x11, 0x05, 0x12,
+    0x21, 0x31, 0x41, 0x06, 0x13, 0x51, 0x61, 0x07,
+    0x22, 0x71, 0x14, 0x32, 0x81, 0x91, 0xa1, 0x08,
+    0x23, 0x42, 0xb1, 0xc1, 0x15, 0x52, 0xd1, 0xf0,
+    0x24, 0x33, 0x62, 0x72, 0x82, 0x09, 0x0a, 0x16,
+    0x17, 0x18, 0x19, 0x1a, 0x25, 0x26, 0x27, 0x28,
+    0x29, 0x2a, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39,
+    0x3a, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49,
+    0x4a, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58, 0x59,
+    0x5a, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68, 0x69,
+    0x6a, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79,
+    0x7a, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89,
+    0x8a, 0x92, 0x93, 0x94, 0x95, 0x96, 0x97, 0x98,
+    0x99, 0x9a, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7,
+    0xa8, 0xa9, 0xaa, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6,
+    0xb7, 0xb8, 0xb9, 0xba, 0xc2, 0xc3, 0xc4, 0xc5,
+    0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xd2, 0xd3, 0xd4,
+    0xd5, 0xd6, 0xd7, 0xd8, 0xd9, 0xda, 0xe1, 0xe2,
+    0xe3, 0xe4, 0xe5, 0xe6, 0xe7, 0xe8, 0xe9, 0xea,
+    0xf1, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8,
+    0xf9, 0xfa
+};
+
+const uint8_t MAMEJPEG_DEFAULT_AC_CHROMA_HUFFMAN_CODE_VALUE[] = {
+    0x00, 0x01, 0x02, 0x03, 0x11, 0x04, 0x05, 0x21,
+    0x31, 0x06, 0x12, 0x41, 0x51, 0x07, 0x61, 0x71,
+    0x13, 0x22, 0x32, 0x81, 0x08, 0x14, 0x42, 0x91,
+    0xa1, 0xb1, 0xc1, 0x09, 0x23, 0x33, 0x52, 0xf0,
+    0x15, 0x62, 0x72, 0xd1, 0x0a, 0x16, 0x24, 0x34,
+    0xe1, 0x25, 0xf1, 0x17, 0x18, 0x19, 0x1a, 0x26,
+    0x27, 0x28, 0x29, 0x2a, 0x35, 0x36, 0x37, 0x38,
+    0x39, 0x3a, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48,
+    0x49, 0x4a, 0x53, 0x54, 0x55, 0x56, 0x57, 0x58,
+    0x59, 0x5a, 0x63, 0x64, 0x65, 0x66, 0x67, 0x68,
+    0x69, 0x6a, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78,
+    0x79, 0x7a, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87,
+    0x88, 0x89, 0x8a, 0x92, 0x93, 0x94, 0x95, 0x96,
+    0x97, 0x98, 0x99, 0x9a, 0xa2, 0xa3, 0xa4, 0xa5,
+    0xa6, 0xa7, 0xa8, 0xa9, 0xaa, 0xb2, 0xb3, 0xb4,
+    0xb5, 0xb6, 0xb7, 0xb8, 0xb9, 0xba, 0xc2, 0xc3,
+    0xc4, 0xc5, 0xc6, 0xc7, 0xc8, 0xc9, 0xca, 0xd2,
+    0xd3, 0xd4, 0xd5, 0xd6, 0xd7, 0xd8, 0xd9, 0xda,
+    0xe2, 0xe3, 0xe4, 0xe5, 0xe6, 0xe7, 0xe8, 0xe9,
+    0xea, 0xf2, 0xf3, 0xf4, 0xf5, 0xf6, 0xf7, 0xf8,
+    0xf9, 0xfa
+};
+
+const uint8_t* MAMEJPEG_DEFAULT_HUFFMAN_CODE_VALUE[2][2] = {
+    {
+        MAMEJPEG_DEFAULT_DC_LUMA_HUFFMAN_CODE_VALUE,
+        MAMEJPEG_DEFAULT_DC_CHROMA_HUFFMAN_CODE_VALUE
+    },
+    {
+        MAMEJPEG_DEFAULT_AC_LUMA_HUFFMAN_CODE_VALUE,
+        MAMEJPEG_DEFAULT_AC_CHROMA_HUFFMAN_CODE_VALUE
+    }
+};
+
+bool mameJpeg_encodeDHTSegment( mameJpeg_context* context )
+{
+    MAMEJPEG_NULL_CHECK( context );
+
+    for( uint8_t i = 0; i < 4; ++i )
+    {
+        uint8_t ac_dc = i & 0x01;
+        uint8_t luma_chroma = i >> 1;
+        if( context->info.huff_table[ac_dc][luma_chroma].elements != NULL )
+        {
+            MAMEJPEG_CHECK( mameBitstream_writeTwoBytes( context->output_stream, MAMEJPEG_MARKER_DHT ) );
+
+            uint16_t huff_code_bytes = 0;
+            for( int j = 0; j < 16; ++j )
+            {
+                huff_code_bytes += MAMEJPEG_DEFAULT_HUFFMAN_CODE_BITS[ac_dc][luma_chroma][j];
+            }
+            huff_code_bytes += 16 + 1;
+
+            uint16_t dht_size = huff_code_bytes + 2;
+            MAMEJPEG_CHECK( mameBitstream_writeTwoBytes( context->output_stream, dht_size ) );
+
+            uint8_t huff_type = ( ac_dc << 4 ) | luma_chroma;
+            MAMEJPEG_CHECK( mameBitstream_writeByte( context->output_stream, huff_type ) );
+
+            uint16_t num_of_codes = 0;
+            for( int i = 0; i < 16; i++ )
+            {
+                num_of_codes += MAMEJPEG_DEFAULT_HUFFMAN_CODE_BITS[ac_dc][luma_chroma][i];
+                MAMEJPEG_CHECK( mameBitstream_writeByte( context->output_stream, MAMEJPEG_DEFAULT_HUFFMAN_CODE_BITS[ac_dc][luma_chroma][i] ) );
+            }
+
+            for( int i = 0; i < num_of_codes; i++ )
+            {
+                MAMEJPEG_CHECK( mameBitstream_writeByte( context->output_stream, MAMEJPEG_DEFAULT_HUFFMAN_CODE_VALUE[ac_dc][luma_chroma][i] ) );
+            }
+        }
+    }
+
+    return true;
+}
+
+bool mameJpeg_getInputBytes( mameJpeg_context* context, uint16_t* output_bytes )
+{
+    MAMEJPEG_NULL_CHECK( context );
+    MAMEJPEG_NULL_CHECK( output_bytes );
+
+    *output_bytes = context->info.component_num * 8 * context->info.component[0].ver_sampling * context->info.width;
+    return true;
+}
+
+bool mameJpeg_readIntoBuffer( mameJpeg_context* context )
+{
+    uint16_t output_bytes = 0;
+    MAMEJPEG_CHECK( mameJpeg_getInputBytes( context, &output_bytes ) );
+
+    for( uint16_t i = 0; i < output_bytes; i++ )
+    {
+        mameBitstream_readByte( context->input_stream, &(context->line_buffer[i]) );
+    }
+
+    return true;
+}
+
+bool mameJpeg_applyEncodeColorConvert( mameJpeg_context* context, uint16_t hor_block, uint16_t ver_block, uint8_t component_index )
+{
+    MAMEJPEG_NULL_CHECK( context );
+
+    int diff_hor_sampling = context->info.component[0].hor_sampling - context->info.component[ component_index ].hor_sampling;
+    int diff_ver_sampling = context->info.component[0].ver_sampling - context->info.component[ component_index ].ver_sampling;
+    int block_width = 8 * ( diff_hor_sampling + 1 );
+    int block_height = 8 * ( diff_ver_sampling + 1 );
+
+    int y_offset = 8 * ver_block;
+    int x_offset = 8 * hor_block;
+    int mcu_width = 8 * context->info.component[0].hor_sampling;
+
+    for( int i = 0; i < 64; i++ )
+    {
+        context->info.dct_work_buffer[i] = 0.0;
+    }
+
+    //for( int y = 0; y < block_height; y++ )
+    for( int y = 0; y < block_height; y += ( 1 + diff_ver_sampling ) )
+    {
+        uint16_t src_index = context->info.component_num * ( ( y + y_offset ) * mcu_width + x_offset );
+        for( int x = 0; x < block_width; x++ )
+        {
+            uint16_t dst_index = 8 * ( y >> diff_ver_sampling ) + ( x >> diff_hor_sampling );
+            for( int i = 0; i < context->info.component_num; i++ )
+            {
+                if( context->info.component_num == 1 )
+                {
+                    context->info.dct_work_buffer[ dst_index ] += context->info.mcu_pixels[ src_index ];
+                }
+                else
+                {
+                    context->info.dct_work_buffer[ dst_index ] += MAMEJPEG_RGB_TO_YCBCR_COEFF[i][component_index] * ( context->info.mcu_pixels[ src_index ] ) ;
+                }
+                src_index++;
+            }
+            context->info.dct_work_buffer[ dst_index ] += MAMEJPEG_RGB_TO_YCBCR_COEFF[3][component_index];
+        }
+    }
+
+    return true;
+}
+
+bool mameJpeg_applyQuantize( mameJpeg_context* context, uint8_t component_index  )
+{
+    MAMEJPEG_NULL_CHECK( context );
+
+    uint8_t table_index = context->info.component[ component_index ].quant_table_index;
+    for( int i = 0; i < 64; i++ )
+    {
+        uint8_t zigzag_index = mameJpeg_getZigZagIndex( context, i );
+        context->info.dct_work_buffer[zigzag_index] /= context->info.quant_table[table_index][i];
+    }
+
+    return true;
+}
+
+bool mameJpeg_encodeHuffmanCode( mameJpeg_context* context, uint8_t ac_dc, uint8_t table_index, uint16_t value, uint8_t code_length, uint16_t* code )
+{
+    MAMEJPEG_NULL_CHECK( context );
+    MAMEJPEG_CHECK( 0 < code_length );
+
+    uint8_t from_index = ( code_length == 0 ) ? 0 : context->info.huff_table[ac_dc][table_index].offsets[ code_length - 1 ];
+    uint8_t to_index = context->info.huff_table[ac_dc][table_index].offsets[ code_length ];
+    for( uint8_t i = from_index; i < to_index; i++ )
+    {
+        if( context->info.huff_table[ac_dc][table_index].elements[i].value == value )
+        {
+            *code = context->info.huff_table[ac_dc][table_index].elements[i].code;
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool mameJpeg_putNextEncodedValue( mameJpeg_context* context, uint8_t ac_dc, uint8_t component_index, uint16_t raw_value )
+{
+    MAMEJPEG_NULL_CHECK( context );
+    //MAMEJPEG_NULL_CHECK( decoded_value );
+    
+    for( uint8_t code_length = 1; code_length <= 16; code_length++ )
+    {
+        uint16_t code = 0;
+        bool ret = mameJpeg_encodeHuffmanCode( context, ac_dc, context->info.component[ component_index ].huff_table_index[ac_dc], raw_value, code_length, &code );
+        if( ret )
+        {
+            MAMEJPEG_CHECK( mameBitstream_writeCompressedImageBits( context->output_stream, &code, code_length ) );
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool mameJpeg_calcEncodeDCValue( mameJpeg_context* context, int16_t diff_value, uint16_t* dc_value,  uint8_t* length )
+{
+    MAMEJPEG_NULL_CHECK( context );
+    MAMEJPEG_NULL_CHECK( dc_value );
+    MAMEJPEG_NULL_CHECK( length );
+
+    *length = 0;
+    int16_t abs_value = abs( diff_value );
+    while( 0 < abs_value )
+    {
+        (*length)++;
+        abs_value >>= 1;
+    }
+
+    int base_value = ( 0 < diff_value ) ? 0 : ( ( 1 << *length ) - 1 );
+    *dc_value = diff_value + base_value;
+    return true;
+}
+
+bool mameJpeg_encodeDC( mameJpeg_context* context, uint8_t component_index )
+{
+    MAMEJPEG_NULL_CHECK( context );
+
+    int16_t diff_value = context->info.dct_work_buffer[0] - context->info.component[ component_index ].prev_dc_value ;
+    context->info.component[ component_index ].prev_dc_value += diff_value;
+
+    uint16_t huffman_dc_value;
+    uint8_t length;
+    MAMEJPEG_CHECK( mameJpeg_calcEncodeDCValue( context, diff_value, &huffman_dc_value, &length ) );
+ 
+    MAMEJPEG_CHECK( mameJpeg_putNextEncodedValue( context, 0, component_index, length ) );
+    MAMEJPEG_CHECK( mameBitstream_writeCompressedImageBits( context->output_stream, &huffman_dc_value, length ) );
+
+    return true;
+}
+
+bool mameJpeg_encodeAC( mameJpeg_context* context, uint8_t component_index )
+{
+    uint8_t elem_num = 1;
+    while( elem_num < 64 )
+    {
+        uint8_t zero_run_length = 0;
+        uint8_t zigzag_index = mameJpeg_getZigZagIndex( context, elem_num );
+        int16_t current_value = (int16_t)context->info.dct_work_buffer[zigzag_index];
+        while( current_value == 0 && elem_num < 64 )
+        {
+            zero_run_length++;
+            elem_num++;
+            zigzag_index = mameJpeg_getZigZagIndex( context, elem_num );
+            current_value = context->info.dct_work_buffer[zigzag_index];
+        }
+
+        uint8_t bit_length = 0;
+        if( elem_num == 64 &&  0 < zero_run_length )
+        {
+            /*
+            if( zero_run_length == 63 )
+            {
+                uint16_t code = 0x0a;
+                MAMEJPEG_CHECK( mameBitstream_writeCompressedImageBits( context->output_stream, &code, 4 ) );
+                break;
+            }
+            else
+            */
+            {
+                zero_run_length = 0;
+                bit_length = 0;
+
+                uint8_t value = ( zero_run_length << 4 ) | bit_length;
+                MAMEJPEG_CHECK( mameJpeg_putNextEncodedValue( context, 1, component_index, value ) );
+                break;
+            }
+        }
+        else
+        {
+            while( 16 <= zero_run_length )
+            {
+                uint8_t value = ( 15 << 4 ) | 0;
+                MAMEJPEG_CHECK( mameJpeg_putNextEncodedValue( context, 1, component_index, value ) );
+
+                zero_run_length -= 16;
+            }
+        }
+
+        int16_t raw_value = current_value;
+        uint16_t huff_value = 0;
+        MAMEJPEG_CHECK( mameJpeg_calcEncodeDCValue( context, raw_value, &huff_value, &bit_length ) );
+
+        uint8_t value = ( zero_run_length << 4 ) | bit_length;
+        MAMEJPEG_CHECK( mameJpeg_putNextEncodedValue( context, 1, component_index, value ) );
+
+        MAMEJPEG_CHECK( mameBitstream_writeCompressedImageBits( context->output_stream, &huff_value, bit_length ) );
+        elem_num++;
+    }
+    return true;
+}
+
+bool mameJpeg_moveBufferToMCU( mameJpeg_context* context, uint16_t hor_mcu_index, uint16_t ver_mcu_index )
+{
+    MAMEJPEG_CHECK( context->info.component_num == 1 || context->info.component_num == 3 );
+
+    uint16_t mcu_width = 8 * context->info.component[0].hor_sampling;
+    uint16_t mcu_height = 8 * context->info.component[0].ver_sampling;
+    for( uint16_t y = 0; y < mcu_height; y++ )
+    {
+        uint16_t hor_bytes = context->info.component_num * mcu_width;
+        uint16_t src_index = context->info.component_num * ( y * context->info.width + mcu_width * hor_mcu_index );
+        uint16_t dst_index = y * hor_bytes;
+        for( uint16_t x = 0; x < hor_bytes; x++ )
+        {
+            context->info.mcu_pixels[ dst_index ] = context->line_buffer[ src_index ];
+
+            src_index++;
+            dst_index++;
+        }
+    }
+
+    return true;
+}
+
+bool mameJpeg_encodeMCU( mameJpeg_context* context, uint16_t hor_mcu_index, uint16_t ver_mcu_index )
+{
+    MAMEJPEG_NULL_CHECK( context );
+
+    MAMEJPEG_CHECK( mameJpeg_moveBufferToMCU( context, hor_mcu_index, ver_mcu_index ) );
+
+    for( uint8_t i = 0; i < context->info.component_num; i++ )
+    {
+        uint16_t num_of_hor_8x8blocks = context->info.component[ i ].hor_sampling;
+        uint16_t num_of_ver_8x8blocks = context->info.component[ i ].ver_sampling;
+        for( uint16_t ver_8x8block_index = 0; ver_8x8block_index < num_of_ver_8x8blocks; ver_8x8block_index++ )
+        {
+            for( uint16_t hor_8x8block_index = 0; hor_8x8block_index < num_of_hor_8x8blocks; hor_8x8block_index++ )
+            {
+                MAMEJPEG_CHECK( mameJpeg_applyEncodeColorConvert( context, hor_8x8block_index, ver_8x8block_index, i ) );
+                MAMEJPEG_CHECK( mameJpeg_applyDCT( context, true ) );
+                MAMEJPEG_CHECK( mameJpeg_applyQuantize( context, i ) );
+                MAMEJPEG_CHECK( mameJpeg_encodeDC( context, i ) );
+                MAMEJPEG_CHECK( mameJpeg_encodeAC( context, i ) );
+            }
+        }
+    }
+
+    return true;
+}
+
+bool mameJpeg_encodeImage( mameJpeg_context* context )
+{
+    MAMEJPEG_NULL_CHECK( context );
+
+    bool useDRI = 0 < context->info.restart_interval;
+    uint16_t restart_interval = context->info.restart_interval;
+
+    uint16_t hor_mcu_num = 0;
+    uint16_t ver_mcu_num = 0;
+    MAMEJPEG_CHECK( mameJpeg_getNumOfMCU( context, &hor_mcu_num, &ver_mcu_num ) );
+
+    for( uint16_t ver_mcu_index = 0; ver_mcu_index < ver_mcu_num; ver_mcu_index++ )
+    {
+        MAMEJPEG_CHECK( mameJpeg_readIntoBuffer( context ) );
+        for( uint16_t hor_mcu_index = 0; hor_mcu_index < hor_mcu_num; hor_mcu_index++)
+        {
+            MAMEJPEG_CHECK( mameJpeg_encodeMCU( context, hor_mcu_index, ver_mcu_index ) );
+
+            if( useDRI )
+            {
+                restart_interval--;
+                if( restart_interval == 0 )
+                {
+                    MAMEJPEG_CHECK( mameJpeg_restartEncode( context ) );
+                    restart_interval = context->info.restart_interval;
+                }
+            }
+        }
+    }
+
+    mameBitstream_flushCompressedImageBits( context->output_stream );
+    return true;
+}
+
+
+bool mameJpeg_encodeSOSSegment( mameJpeg_context* context )
+{
+    MAMEJPEG_NULL_CHECK( context );
+
+   MAMEJPEG_CHECK( mameBitstream_writeTwoBytes( context->output_stream, MAMEJPEG_MARKER_SOS ) );
+
+    uint16_t sos_size = 4 + context->info.component_num * 2 + 2;
+    MAMEJPEG_CHECK( mameBitstream_writeTwoBytes( context->output_stream, sos_size ) );
+
+    MAMEJPEG_CHECK( mameBitstream_writeByte( context->output_stream, context->info.component_num ) );
+    for( uint8_t i = 0; i < context->info.component_num; i++ )
+    {
+        uint8_t component_index = i + 1;
+        MAMEJPEG_CHECK( mameBitstream_writeByte( context->output_stream, component_index ) );
+
+        uint8_t table_index = ( context->info.component[i].huff_table_index[1] << 4 ) | context->info.component[i].huff_table_index[0];
+        MAMEJPEG_CHECK( mameBitstream_writeByte( context->output_stream, table_index ) );
+    }
+
+    MAMEJPEG_CHECK( mameBitstream_writeByte( context->output_stream, 0 ) );
+    MAMEJPEG_CHECK( mameBitstream_writeByte( context->output_stream, 63 ) );
+    MAMEJPEG_CHECK( mameBitstream_writeByte( context->output_stream, 0 ) );
+
+    MAMEJPEG_CHECK( mameJpeg_encodeImage( context ) );
+    return true;
+}
+
+bool mameJpeg_encodeEOISegment( mameJpeg_context* context )
+{
+    MAMEJPEG_NULL_CHECK( context );
+
+    MAMEJPEG_CHECK( mameBitstream_writeTwoBytes( context->output_stream, MAMEJPEG_MARKER_EOI ) );
+
+    return true;
+}
+
+bool mameJpeg_setEncodeParams( mameJpeg_context* context, uint16_t width, uint16_t height, mameJpeg_format format )
+{
+    MAMEJPEG_NULL_CHECK( context );
+
+    context->info.accuracy = 8;
+    context->info.width = width;
+    context->info.height = height;
+    switch (format) {
+        case MAMEJPEG_FORMAT_YCBCR_444:
+        {
+            context->info.component_num = 3;
+            context->info.component[0].hor_sampling = 1;
+            context->info.component[0].ver_sampling = 1;
+            context->info.component[1].hor_sampling = 1;
+            context->info.component[1].ver_sampling = 1;
+            context->info.component[2].hor_sampling = 1;
+            context->info.component[2].ver_sampling = 1;
+        } break;
+        case MAMEJPEG_FORMAT_YCBCR_422v:
+        {
+            context->info.component_num = 3;
+            context->info.component[0].hor_sampling = 1;
+            context->info.component[0].ver_sampling = 2;
+            context->info.component[1].hor_sampling = 1;
+            context->info.component[1].ver_sampling = 1;
+            context->info.component[2].hor_sampling = 1;
+            context->info.component[2].ver_sampling = 1;
+        } break;
+        case MAMEJPEG_FORMAT_YCBCR_422h:
+        {
+            context->info.component_num = 3;
+            context->info.component[0].hor_sampling = 2;
+            context->info.component[0].ver_sampling = 1;
+            context->info.component[1].hor_sampling = 1;
+            context->info.component[1].ver_sampling = 1;
+            context->info.component[2].hor_sampling = 1;
+            context->info.component[2].ver_sampling = 1;
+        } break;
+        case MAMEJPEG_FORMAT_YCBCR_420:
+        {
+            context->info.component_num = 3;
+            context->info.component[0].hor_sampling = 2;
+            context->info.component[0].ver_sampling = 2;
+            context->info.component[1].hor_sampling = 1;
+            context->info.component[1].ver_sampling = 1;
+            context->info.component[2].hor_sampling = 1;
+            context->info.component[2].ver_sampling = 1;
+        } break;
+        case MAMEJPEG_FORMAT_Y_444:
+        {
+            context->info.component_num = 1;
+            context->info.component[0].hor_sampling = 1;
+            context->info.component[0].ver_sampling = 1;
+        } break;
+        default:
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool mameJpeg_encode( mameJpeg_context* context )
+{
+    MAMEJPEG_NULL_CHECK( context );
+    MAMEJPEG_CHECK( context->mode == MAMEJPEG_MODE_ENCODE );
+
+    context->info.quant_table[0] = NULL;
+    context->info.quant_table[1] = NULL;
+    context->info.quant_table[2] = NULL;
+    context->info.quant_table[3] = NULL;
+    uint8_t max_luma_chroma = ( context->info.component_num == 1 ) ? 1 : 2;
+    for( uint8_t luma_chroma = 0; luma_chroma < max_luma_chroma; luma_chroma++ )
+    {
+        for( uint8_t ac_dc = 0; ac_dc < 2; ac_dc++ )
+        {
+            if( context->info.huff_table[ac_dc][luma_chroma].elements != NULL )
+            {
+                uint16_t code = 0;
+                uint16_t total_codes = 0;
+                for( int i = 0; i < 16; i++ )
+                {
+                    uint16_t num_of_codes = MAMEJPEG_DEFAULT_HUFFMAN_CODE_BITS[ac_dc][luma_chroma][i];
+                    context->info.huff_table[ac_dc][luma_chroma].offsets[i] = total_codes;
+                    for( int j = 0; j < num_of_codes; j++ )
+                    {
+                        uint16_t element_index = total_codes + j;
+                        uint16_t value = MAMEJPEG_DEFAULT_HUFFMAN_CODE_VALUE[ac_dc][luma_chroma][element_index];
+                        context->info.huff_table[ac_dc][luma_chroma].elements[ element_index ].code = code;
+                        context->info.huff_table[ac_dc][luma_chroma].elements[ element_index ].value = value;
+                        code++;
+                    }
+
+                    code <<= 1;
+                    total_codes += num_of_codes;
+                }
+                context->info.huff_table[ac_dc][luma_chroma].offsets[16] = total_codes;
+            }
+        }
+
+        context->info.quant_table[luma_chroma] = (uint8_t*)MAMEJPEG_DEFAULT_QUANT_TABLE[luma_chroma];
+    }
+
+    for( int i = 0; i < context->info.component_num; i++ )
+    {
+        //context->info.component[i].hor_sampling = 1;
+        //context->info.component[i].ver_sampling = 1;
+        context->info.component[i].quant_table_index = ( i == 0 ) ? 0 : 1;
+        context->info.component[i].huff_table_index[0] = ( i == 0 ) ? 0 : 1;
+        context->info.component[i].huff_table_index[1] = ( i == 0 ) ? 0 : 1;
+        context->info.component[i].prev_dc_value = 0;
+    }
+
+    MAMEJPEG_CHECK( mameJpeg_encodeSOISegment( context ) );
+    MAMEJPEG_CHECK( mameJpeg_encodeDQTSegment( context ) );
+    MAMEJPEG_CHECK( mameJpeg_encodeSOF0Segment( context ) );
+    MAMEJPEG_CHECK( mameJpeg_encodeDHTSegment( context ) );
+    MAMEJPEG_CHECK( mameJpeg_encodeSOSSegment( context ) );
+    MAMEJPEG_CHECK( mameJpeg_encodeEOISegment( context ) );
+    return true;
+}
+
 
 bool mameJpeg_dispose( mameJpeg_context* context )
 {
@@ -1109,8 +2002,13 @@ bool mameJpeg_dumpHeader( mameJpeg_context* context )
         for( int luma_chroma_index = 0; luma_chroma_index < 2; luma_chroma_index++ )
         {
             const char* luma_chrom_str = ( luma_chroma_index == 0 ) ? "luma" : "chroma";
+            if( context->info.huff_table[ac_dc_index][luma_chroma_index].elements == NULL )
+            {
+                continue;
+            }
+
             printf("dht - %s/%s\n",ac_dc_str,luma_chrom_str);
-            for( int i = 0; i < 16; i++ )
+            for( int i = 0; i < 17; i++ )
             {
                 int from_index = ( i == 0 ) ? 0 : context->info.huff_table[ac_dc_index][luma_chroma_index].offsets[i-1];
                 if( from_index == context->info.huff_table[ac_dc_index][luma_chroma_index].offsets[i] )
