@@ -235,24 +235,14 @@ uint8_t jpeg_test_pattern_color_444_expect[] = {
 255,255,255,254,254,254,255,255,255,254,254,254,255,255,255,255,255,255,255,255,255,254,254,254,
 200,255,200,197,254,199,200,255,198,197,254,199,255,254,255,255,255,255,255,254,255,255,255,255,
 255,255,255,255,255,255,255,255,255,255,255,255,254,254,254,254,254,254,255,255,255,255,255,255
-/*
-255,   0,  0, 255,  0,  0, 255,  0,   0, 255,  0,  0,   0, 255,  0,  0, 255,  0,   0, 255,  0,  0, 255,  0, 
-255,   0,  0, 255,  0,  0, 255,  0,   0, 255,  0,  0,   0, 255,  0,  0, 255,  0,   0, 255,  0,  0, 255,  0, 
-255,   0,  0, 255,  0,  0, 255,  0,   0, 255,  0,  0,   0, 255,  0,  0, 255,  0,   0, 255,  0,  0, 255,  0, 
-255,   0,  0, 255,  0,  0, 255,  0,   0, 255,  0,  0,   0, 255,  0,  0, 255,  0,   0, 255,  0,  0, 255,  0, 
-  0, 255,  0,  0, 255,  0,   0, 255,  0,  0, 255,  0, 255,   0,  0, 255,  0,  0, 255,  0,   0, 255,  0,  0, 
-  0, 255,  0,  0, 255,  0,   0, 255,  0,  0, 255,  0, 255,   0,  0, 255,  0,  0, 255,  0,   0, 255,  0,  0, 
-  0, 255,  0,  0, 255,  0,   0, 255,  0,  0, 255,  0, 255,   0,  0, 255,  0,  0, 255,  0,   0, 255,  0,  0, 
-  0, 255,  0,  0, 255,  0,   0, 255,  0,  0, 255,  0, 255,   0,  0, 255,  0,  0, 255,  0,   0, 255,  0,  0, 
-  */
 };
-#if 0
+
 TEST_CASE("Bitsteram read test", "[sample]")
 {
     uint8_t buffer[9] = { 0xfa, 0xab, 0x32, 0xb3, 0xf8, 0xc3, 0xaa, 0xaa, 0xbb };
     mameJpeg_memory_callback_param param = { buffer, 0, sizeof( buffer ) / sizeof( uint8_t ) };
     mameBitstream_context bitstream[1];
-    mameBitstream_input_initialize( bitstream, mameJpeg_input_from_memory_callback, mameJpeg_rewind_memory_callback, &param  );
+    mameBitstream_input_initialize( bitstream, mameJpeg_input_from_memory_callback, &param  );
 
     uint8_t data8 = 0;
     CHECK( mameBitstream_readBits(bitstream, &data8, 1, 1 ) );
@@ -287,14 +277,13 @@ TEST_CASE("Bitsteram read test", "[sample]")
     CHECK( data16 == 0xaabb );
 
 }
-#endif
-#if 0
+
 TEST_CASE("Bitsteram write test", "[sample]")
 {
     uint8_t buffer[9];
     mameBitstream_context bitstream[1];
     mameJpeg_memory_callback_param param = { buffer, 0, sizeof( buffer ) / sizeof( uint8_t ) };
-    mameBitstream_output_initialize( bitstream, mameJpeg_output_to_memory_callback, mameJpeg_rewind_memory_callback, &param  );
+    mameBitstream_output_initialize( bitstream, mameJpeg_output_to_memory_callback, &param  );
 
     uint8_t data8 = 0x01;
     CHECK( mameBitstream_writeBits(bitstream, &data8, 1 ) );
@@ -327,21 +316,22 @@ TEST_CASE("Bitsteram write test", "[sample]")
     int res = memcmp( buffer, "\xfa\xab\x32\xb3\xf8\xc3\xaa\xaa\xbb", sizeof( buffer ) / sizeof( uint8_t ) );
     CHECK( res == 0 );
 }
-#endif
-#if 0
+
 TEST_CASE("Get image info", "[getImageInfo]")
 {
     uint16_t width;
     uint16_t height;
     uint8_t components;
-    mameJpeg_memory_callback_param input_param = { (void*)jpeg_test_pattern_binary, 0, sizeof( jpeg_test_pattern_binary) / sizeof( uint8_t ) };
+    mameJpeg_memory_callback_param input_param = {
+        .buffer_ptr = (void*)jpeg_test_pattern_binary,
+        .buffer_pos = 0,
+        .buffer_size = sizeof( jpeg_test_pattern_binary) / sizeof( uint8_t )
+    };
     mameJpeg_getImageInfo( mameJpeg_input_from_memory_callback,
-                           mameJpeg_rewind_memory_callback,
                            &input_param,
                            &width,
                            &height,
                            &components );
-    printf("%s %d\n", __FILE__, __LINE__ );
 
     CHECK( width == 16 );
     CHECK( height == 16 );
@@ -368,168 +358,177 @@ TEST_CASE("Decode binary jpeg", "[sample]")
         uint16_t width;
         uint16_t height;
         uint8_t components;
+        size_t work_buffer_size;
         mameJpeg_memory_callback_param info_input_param = {
-            (void*)datas[i].data,
-            0,
-            datas[i].size
+            .buffer_ptr = (void*)datas[i].data,
+            .buffer_pos = 0,
+            .buffer_size = datas[i].size
         };
-        mameJpeg_getImageInfo( mameJpeg_input_from_memory_callback,
-                mameJpeg_rewind_memory_callback,
-                &info_input_param,
-                &width,
-                &height,
-                &components );
+        mameJpeg_getDecodeBufferSize( mameJpeg_input_from_memory_callback,
+                                      &info_input_param,
+                                      &width,
+                                      &height,
+                                      &components,
+                                      &work_buffer_size );
 
         mameJpeg_memory_callback_param input_param = {
-            (void*)datas[i].data,
-            0,
-            datas[i].size
+            .buffer_ptr = (void*)datas[i].data,
+            .buffer_pos = 0,
+            .buffer_size = datas[i].size
         };
-        size_t decode_image_buffer_size = components * width * height;
-        uint8_t decode_image_buffer[ decode_image_buffer_size ];
-        mameJpeg_memory_callback_param output_param = {
-            decode_image_buffer,
-            0,
-            decode_image_buffer_size
-        };
-        mameJpeg_context context[1];
-        mameJpeg_initialize( context,
-                mameJpeg_input_from_memory_callback,
-                mameJpeg_rewind_memory_callback,
-                &input_param,
-                mameJpeg_output_to_memory_callback,
-                mameJpeg_rewind_memory_callback,
-                &output_param,
-                MAMEJPEG_MODE_DECODE );
-
-        size_t work_buffer_size;
-        mameJpeg_getWorkBufferSize( context, &work_buffer_size );
 
         uint8_t work_buffer[ work_buffer_size ];
         memset( work_buffer, 0x00, work_buffer_size );
-        mameJpeg_setWorkBuffer( context, work_buffer, work_buffer_size );
+
+        size_t decode_image_buffer_size = components * width * height;
+        uint8_t decode_image_buffer[ decode_image_buffer_size ];
+        mameJpeg_memory_callback_param output_param = {
+            .buffer_ptr = decode_image_buffer,
+            .buffer_pos = 0,
+            .buffer_size = decode_image_buffer_size
+        };
+
+        mameJpeg_context context[1];
+        mameJpeg_initializeDecode( context,
+                                   mameJpeg_input_from_memory_callback,
+                                   &input_param,
+                                   mameJpeg_output_to_memory_callback,
+                                   &output_param,
+                                   work_buffer,
+                                   work_buffer_size );
 
         mameJpeg_decode( context );
 
         double diff_sum = 0.0;
         int pixels = components * width * height;
-        //printf("-------------------------------\n" );
         for( int j = 0; j < pixels; j++ )
         {
             uint8_t v = decode_image_buffer[ j ];
             uint8_t e = datas[i].expect[ j ];
             int diff = (int)v - (int)e;
-
-            //printf("%4d(%4d,%4d)%c",v,e, diff, ( ( j + 1 ) % ( components * width ) == 0 ) ? '\n' : ' '  );
-            //printf("%3d(%d)%c",v,e,( ( j + 1 ) % ( components * width ) == 0 ) ? '\n' : ' '  );
-            //printf("%4d%c",v, ( ( j + 1 ) % ( components * width ) == 0 ) ? '\n' : ' '  );
             diff_sum += abs( diff );
         }
         diff_sum /= pixels;
-        //printf("diff sum:%lf\n", diff_sum );
         CHECK( diff_sum < 1.0 );
-
-        //mameJpeg_dumpHeader( context );
-        //size_t size;
-        //mameBitmap_encodeToFile( decode_image_buffer, 1024 * 1024, "./out.ppm", context->info.width, context->info.height, MAMEBITMAP_FORMAT_PPM_ASCII, 255, &size );
     }
 }
-#endif
 
-#if 1
 TEST_CASE("Encode jpeg", "[sample]")
 {
     struct {
         uint8_t* data;
         uint8_t* expect;
         size_t size;
+        mameJpeg_format format;
     } datas[] = {
-        //{ jpeg_test_pattern_binary, jpeg_test_pattern_binary_expect, sizeof( jpeg_test_pattern_binary_expect ) },
-        //{ jpeg_test_pattern_grayscale, jpeg_test_pattern_grayscale_expect, sizeof( jpeg_test_pattern_grayscale_expect ) },
-        //{ jpeg_test_pattern_color_444, jpeg_test_pattern_color_444_expect,  sizeof( jpeg_test_pattern_color_444_expect ) },
-        { jpeg_test_pattern_color_422v, jpeg_test_pattern_color_422v_expect, sizeof( jpeg_test_pattern_color_422v_expect ) },
-        //{ jpeg_test_pattern_color_422h, jpeg_test_pattern_color_422h_expect, sizeof( jpeg_test_pattern_color_422h ) },
-        //{ jpeg_test_pattern_color_420, jpeg_test_pattern_color_420_expect, sizeof( jpeg_test_pattern_color_420 ) },
+        { jpeg_test_pattern_binary_expect, jpeg_test_pattern_binary_expect,  sizeof( jpeg_test_pattern_binary_expect ), MAMEJPEG_FORMAT_Y_444 },
+        { jpeg_test_pattern_grayscale_expect, jpeg_test_pattern_grayscale_expect, sizeof( jpeg_test_pattern_grayscale_expect ), MAMEJPEG_FORMAT_Y_444 },
+        { jpeg_test_pattern_color_444_expect, jpeg_test_pattern_color_444_expect, sizeof( jpeg_test_pattern_color_444_expect ), MAMEJPEG_FORMAT_YCBCR_444 },
+        { jpeg_test_pattern_color_444_expect, jpeg_test_pattern_color_422v_expect, sizeof( jpeg_test_pattern_color_444_expect ), MAMEJPEG_FORMAT_YCBCR_422v },
+        { jpeg_test_pattern_color_444_expect, jpeg_test_pattern_color_422h_expect, sizeof( jpeg_test_pattern_color_444_expect ), MAMEJPEG_FORMAT_YCBCR_422h },
+        { jpeg_test_pattern_color_444_expect, jpeg_test_pattern_color_420_expect, sizeof( jpeg_test_pattern_color_444_expect ), MAMEJPEG_FORMAT_YCBCR_420 },
     };
 
     for( int i = 0; i < sizeof( datas ) / sizeof( datas[0] ); i++ )
     {
         uint16_t width = 16;
         uint16_t height = 16;
-        uint8_t components = 3;
-        mameJpeg_memory_callback_param input_param = {
-            (void*)datas[i].expect,
-            0,
-            datas[i].size
-        };
-        size_t encode_image_buffer_size = components * width * height;
+        mameJpeg_format format = datas[i].format;
+        uint8_t components = mameJpeg_getComponentNum( format );
+
+        size_t encode_image_buffer_size = 1024 * 1024;
         uint8_t encode_image_buffer[ encode_image_buffer_size ];
-        /*
-        mameJpeg_memory_callback_param output_param = {
-            encode_image_buffer,
-            0,
-            encode_image_buffer_size
-        };
-        */
-        FILE* output_param = fopen( "./test.jpg", "w" );
 
-        mameJpeg_context context[1];
-        mameJpeg_initialize( context,
-                mameJpeg_input_from_memory_callback,
-                mameJpeg_rewind_memory_callback,
-                &input_param,
-                //mameJpeg_output_to_memory_callback,
-                //mameJpeg_rewind_memory_callback,
-                //output_param,
-                mameJpeg_output_to_file_callback,
-                mameJpeg_rewind_file_callback,
-                output_param,
-                MAMEJPEG_MODE_ENCODE );
-
-        size_t work_buffer_size;
-        //mameJpeg_getWorkBufferSize( context, &work_buffer_size );
-
-        work_buffer_size = 1024 * 1024 * 2;
-        uint8_t work_buffer[ work_buffer_size ];
-        memset( work_buffer, 0x00, work_buffer_size );
-        mameJpeg_setWorkBuffer( context, work_buffer, work_buffer_size );
-
-        //mameJpeg_setEncodeParams( context, width, height, MAMEJPEG_FORMAT_Y_444 );
-        //mameJpeg_setEncodeParams( context, width, height, MAMEJPEG_FORMAT_YCBCR_422v );
-        mameJpeg_setEncodeParams( context, width, height, MAMEJPEG_FORMAT_YCBCR_422h );
-        //mameJpeg_setEncodeParams( context, width, height, MAMEJPEG_FORMAT_YCBCR_420 );
-        //mameJpeg_setEncodeParams( context, width, height, MAMEJPEG_FORMAT_YCBCR_444 );
-
-        mameJpeg_encode( context );
-
-        fclose( output_param );
-
-        //mameJpeg_dumpHeader( context );
-#if 0
-        double diff_sum = 0.0;
-        int pixels = components * width * height;
-        //printf("-------------------------------\n" );
-        for( int j = 0; j < pixels; j++ )
         {
-            uint8_t v = decode_image_buffer[ j ];
-            uint8_t e = datas[i].expect[ j ];
-            int diff = (int)v - (int)e;
+            mameJpeg_memory_callback_param input_param = {
+                .buffer_ptr = (void*)datas[i].data,
+                .buffer_pos = 0,
+                .buffer_size = datas[i].size
+            };
 
-            //printf("%4d(%4d,%4d)%c",v,e, diff, ( ( j + 1 ) % ( components * width ) == 0 ) ? '\n' : ' '  );
-            //printf("%3d(%d)%c",v,e,( ( j + 1 ) % ( components * width ) == 0 ) ? '\n' : ' '  );
-            //printf("%4d%c",v, ( ( j + 1 ) % ( components * width ) == 0 ) ? '\n' : ' '  );
-            diff_sum += abs( diff );
+            mameJpeg_memory_callback_param output_param = {
+                encode_image_buffer,
+                0,
+                encode_image_buffer_size
+            };
+
+            size_t work_buffer_size;
+            mameJpeg_getEncodeBufferSize( width, height, format, &work_buffer_size );
+
+            uint8_t work_buffer[ work_buffer_size ];
+            memset( work_buffer, 0x00, work_buffer_size );
+
+            mameJpeg_context context[1];
+            mameJpeg_initializeEncode( context,
+                    mameJpeg_input_from_memory_callback,
+                    &input_param,
+                    mameJpeg_output_to_memory_callback,
+                    &output_param,
+                    width,
+                    height,
+                    format,
+                    work_buffer,
+                    work_buffer_size);
+
+            mameJpeg_encode( context );
+
+            FILE* fff = fopen( "./test2.jpg", "w" );
+            fwrite( encode_image_buffer, encode_image_buffer_size, 1, fff );
+            fclose( fff );
         }
-        diff_sum /= pixels;
-        //printf("diff sum:%lf\n", diff_sum );
-        CHECK( diff_sum < 1.0 );
 
-        //mameJpeg_dumpHeader( context );
-        //size_t size;
-        //mameBitmap_encodeToFile( decode_image_buffer, 1024 * 1024, "./out.ppm", context->info.width, context->info.height, MAMEBITMAP_FORMAT_PPM_ASCII, 255, &size );
-#endif
+        {
+            size_t work_buffer_size;
+            mameJpeg_memory_callback_param info_input_param = {
+                .buffer_ptr = (void*)encode_image_buffer,
+                .buffer_pos = 0,
+                .buffer_size = encode_image_buffer_size
+            };
+            mameJpeg_getDecodeBufferSize( mameJpeg_input_from_memory_callback,
+                    &info_input_param,
+                    NULL,
+                    NULL,
+                    NULL,
+                    &work_buffer_size );
+            uint8_t work_buffer[ work_buffer_size ];
+            memset( work_buffer, 0x00, work_buffer_size );
+
+            mameJpeg_memory_callback_param input_param = {
+                .buffer_ptr = (void*)encode_image_buffer,
+                .buffer_pos = 0,
+                .buffer_size = encode_image_buffer_size
+            };
+
+            size_t decode_image_buffer_size = components * width * height;
+            uint8_t decode_image_buffer[ decode_image_buffer_size ];
+            mameJpeg_memory_callback_param output_param = {
+                .buffer_ptr = (void*)decode_image_buffer,
+                .buffer_pos = 0,
+                .buffer_size = decode_image_buffer_size
+            };
+
+            mameJpeg_context context[1];
+            mameJpeg_initializeDecode( context,
+                    mameJpeg_input_from_memory_callback,
+                    &input_param,
+                    mameJpeg_output_to_memory_callback,
+                    &output_param,
+                    work_buffer,
+                    work_buffer_size );
+
+            mameJpeg_decode( context );
+
+            double diff_sum = 0.0;
+            int pixels = components * width * height;
+            for( int j = 0; j < pixels; j++ )
+            {
+                uint8_t v = decode_image_buffer[ j ];
+                uint8_t e = datas[i].expect[ j ];
+                int diff = (int)v - (int)e;
+                diff_sum += abs( diff );
+            }
+            diff_sum /= pixels;
+            CHECK( diff_sum < 30.0 );
+        }
     }
 }
-#endif
-
-
