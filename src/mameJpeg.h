@@ -8,6 +8,7 @@ extern "C" {
 #include <ctype.h>
 #include <stdbool.h>
 #include <string.h>
+#include <stdlib.h>
 #include <math.h>
 
 #define MAMEJPEG_CHECK( X ) do{if((X)==false )return false;}while(0)
