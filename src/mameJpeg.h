@@ -574,7 +574,7 @@ bool mameJpeg_getNextMarker( mameJpeg_context* context, mameJpeg_marker* marker 
     MAMEJPEG_NULL_CHECK( context );
     MAMEJPEG_NULL_CHECK( marker );
 
-    uint8_t prefix;
+    uint8_t prefix = 0x00;
     while( mameJpeg_stream_readByte( context->input_stream, &prefix ) )
     {
         if( prefix == 0xff )
@@ -815,17 +815,6 @@ bool mameJpeg_moveMCUToBuffer( mameJpeg_context* context, uint16_t hor_mcu_index
             context->info.mcu_pixels[ src_index ] = 0.0;
             src_index++;
             dst_index++;
-        }
-    }
-
-    for( uint16_t y = 0; y < mcu_width; y++ )
-    {
-        uint16_t hor_bytes = context->info.component_num * mcu_width;
-        uint16_t src_index = y * hor_bytes;
-        for( uint16_t x = 0; x < hor_bytes; x++ )
-        {
-            context->info.mcu_pixels[ src_index ] = 0.0;
-            src_index++;
         }
     }
 
@@ -1234,7 +1223,7 @@ bool mameJpeg_decode( mameJpeg_context* context )
     MAMEJPEG_NULL_CHECK( context );
     MAMEJPEG_CHECK( context->mode == MAMEJPEG_MODE_DECODE );
 
-    mameJpeg_marker marker;
+    mameJpeg_marker marker = MAMEJPEG_MARKER_UNKNOWN;
     while( mameJpeg_getNextMarker( context, &marker ) )
     {
         int func_index = 0;
