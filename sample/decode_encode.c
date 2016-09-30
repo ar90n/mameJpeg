@@ -51,7 +51,7 @@ int main(int argc, char** argv)
         .buffer_size = decode_image_buffer_size
     };
 
-    uint8_t decode_work_buffer[ decode_work_buffer_size];
+    uint8_t decode_work_buffer[ decode_work_buffer_size ];
     mameJpeg_context decode_context[1];
     ret = mameJpeg_initializeDecode( decode_context,
                                      mameJpeg_input_from_file_callback,
@@ -66,7 +66,7 @@ int main(int argc, char** argv)
         fclose( input_fp );
         exit( -1 );
     }
-    
+
     ret = mameJpeg_decode( decode_context );
     fclose( input_fp );
     if( !ret )

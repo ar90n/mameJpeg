@@ -8,6 +8,7 @@ extern "C" {
 # include <stdbool.h>
 # include <string.h>
 # include <stdlib.h>
+# include <stdint.h>
 # include <math.h>
 
 /* data type definitions */
@@ -307,8 +308,6 @@ bool mameJpeg_stream_writeTwoBytes( mameJpeg_stream_context* context, uint16_t t
     return true ;
 }
 
-typedef double mameJpeg_dct_element;
-
 typedef enum{
     MAMEJPEG_MARKER_SOI = 0xffd8,
     MAMEJPEG_MARKER_DQT = 0xffdb,
@@ -406,7 +405,7 @@ size_t mameJpeg_getMCUBufferSize( uint16_t width, uint8_t component_num, uint8_t
 {
     size_t hor_bytes = component_num * luma_hor_sampling * 8;
     size_t ver_bytes = luma_ver_sampling * 8;
-    return sizeof( mameJpeg_dct_element ) * hor_bytes * ver_bytes;
+    return sizeof( double ) * hor_bytes * ver_bytes;
 }
 
 static
@@ -443,110 +442,182 @@ uint8_t mameJpeg_getZigZagIndex( mameJpeg_context* context, uint8_t index )
 }
 
 static
+bool mameJpeg_1D_DCT( const double* src_buffer, size_t const element_stride, double* dst_buffer )
+{
+    static const double sqrt2 = 1.4142135623730951;
+    static const double c1 = 0.9807852804032304;
+    static const double s1 = 0.19509032201612825;
+    static const double c3 = 0.8314696123025452;
+    static const double s3 = 0.5555702330196022;
+    static const double c6 = 0.5555702330196023;
+    static const double s6 = 0.8314696123025451;
+
+    /* load */
+    const double src0 = src_buffer[element_stride * 0];
+    const double src1 = src_buffer[element_stride * 1];
+    const double src2 = src_buffer[element_stride * 2];
+    const double src3 = src_buffer[element_stride * 3];
+    const double src4 = src_buffer[element_stride * 4];
+    const double src5 = src_buffer[element_stride * 5];
+    const double src6 = src_buffer[element_stride * 6];
+    const double src7 = src_buffer[element_stride * 7];
+
+    /* stage 1 */
+    const double s1_0 =  src0 + src7;
+    const double s1_1 =  src1 + src6;
+    const double s1_2 =  src2 + src5;
+    const double s1_3 =  src3 + src4;
+    const double s1_4 = -src4 + src3;
+    const double s1_5 = -src5 + src2;
+    const double s1_6 = -src6 + src1;
+    const double s1_7 = -src7 + src0;
+
+    /* stage 2 */
+    const double s2_0 =  s1_0 + s1_3;
+    const double s2_1 =  s1_1 + s1_2;
+    const double s2_2 = -s1_2 + s1_1;
+    const double s2_3 = -s1_3 + s1_0;
+
+    const double s2_4 =  s1_4 * c3 + s1_7 * s3;
+    const double s2_7 = -s1_4 * s3 + s1_7 * c3;
+
+    const double s2_5 =  s1_5 * c1 + s1_6 * s1;
+    const double s2_6 = -s1_5 * s1 + s1_6 * c1;
+
+    /* stage 3 */
+    const double s3_0 =  s2_0 + s2_1;
+    const double s3_1 = -s2_1 + s2_0;
+
+    const double s3_2 = sqrt2 * ( s2_2 * c6 + s2_3 * s6);
+    const double s3_3 = sqrt2 * (-s2_2 * s6 + s2_3 * c6);
+
+    const double s3_4 =  s2_4 + s2_6;
+    const double s3_5 = -s2_5 + s2_7;
+    const double s3_6 = -s2_6 + s2_4;
+    const double s3_7 =  s2_7 + s2_5;
+
+    /* stage 4 */
+    const double s4_4 = -s3_4 + s3_7;
+    const double s4_5 =  s3_5 * sqrt2;
+    const double s4_6 =  s3_6 * sqrt2;
+    const double s4_7 =  s3_7 + s3_4;
+
+    /* shuffle and store */
+    dst_buffer[element_stride * 0] = s3_0;
+    dst_buffer[element_stride * 4] = s3_1;
+    dst_buffer[element_stride * 2] = s3_2;
+    dst_buffer[element_stride * 6] = s3_3;
+    dst_buffer[element_stride * 7] = s4_4;
+    dst_buffer[element_stride * 3] = s4_5;
+    dst_buffer[element_stride * 5] = s4_6;
+    dst_buffer[element_stride * 1] = s4_7;
+}
+
+static
+bool mameJpeg_1D_IDCT( const double* src_buffer, size_t const element_stride, double* dst_buffer )
+{
+    static const double sqrt2 = 1.4142135623730951;
+    static const double c1 = 0.9807852804032304;
+    static const double s1 = 0.19509032201612825;
+    static const double c3 = 0.8314696123025452;
+    static const double s3 = 0.5555702330196022;
+    static const double c6 = 0.5555702330196023;
+    static const double s6 = 0.8314696123025451;
+
+    /* shuffle and load */
+    const double src0 = dst_buffer[element_stride * 0];
+    const double src1 = dst_buffer[element_stride * 4];
+    const double src2 = dst_buffer[element_stride * 2];
+    const double src3 = dst_buffer[element_stride * 6];
+    const double src4 = dst_buffer[element_stride * 7];
+    const double src5 = dst_buffer[element_stride * 3];
+    const double src6 = dst_buffer[element_stride * 5];
+    const double src7 = dst_buffer[element_stride * 1];
+
+    /* stage 1 */
+    const double s1_4 = -src4 + src7;
+    const double s1_5 =  src5 * sqrt2;
+    const double s1_6 =  src6 * sqrt2;
+    const double s1_7 =  src7 + src4;
+
+    /* stage 2 */
+    const double s2_0 =  src0 + src1;
+    const double s2_1 = -src1 + src0;
+
+    const double s2_2 = sqrt2 * ( src2 * c6 - src3 * s6);
+    const double s2_3 = sqrt2 * ( src2 * s6 + src3 * c6);
+
+    const double s2_4 =  s1_4 + s1_6;
+    const double s2_5 = -s1_5 + s1_7;
+    const double s2_6 = -s1_6 + s1_4;
+    const double s2_7 =  s1_7 + s1_5;
+
+    /* stage 3 */
+    const double s3_0 =  s2_0 + s2_3;
+    const double s3_1 =  s2_1 + s2_2;
+    const double s3_2 = -s2_2 + s2_1;
+    const double s3_3 = -s2_3 + s2_0;
+
+    const double s3_4 =  s2_4 * c3 - s2_7 * s3;
+    const double s3_7 =  s2_4 * s3 + s2_7 * c3;
+
+    const double s3_5 =  s2_5 * c1 - s2_6 * s1;
+    const double s3_6 =  s2_5 * s1 + s2_6 * c1;
+
+    /* stage 4 */
+    const double s4_0 =  s3_0 + s3_7;
+    const double s4_1 =  s3_1 + s3_6;
+    const double s4_2 =  s3_2 + s3_5;
+    const double s4_3 =  s3_3 + s3_4;
+    const double s4_4 = -s3_4 + s3_3;
+    const double s4_5 = -s3_5 + s3_2;
+    const double s4_6 = -s3_6 + s3_1;
+    const double s4_7 = -s3_7 + s3_0;
+
+    /* store */
+    dst_buffer[element_stride * 0] = s4_0;
+    dst_buffer[element_stride * 1] = s4_1;
+    dst_buffer[element_stride * 2] = s4_2;
+    dst_buffer[element_stride * 3] = s4_3;
+    dst_buffer[element_stride * 4] = s4_4;
+    dst_buffer[element_stride * 5] = s4_5;
+    dst_buffer[element_stride * 6] = s4_6;
+    dst_buffer[element_stride * 7] = s4_7;
+}
+
+static
 bool mameJpeg_applyDCT( mameJpeg_context* context, bool is_forward )
 {
     MAMEJPEG_NULL_CHECK( context );
 
-#if 0
+    typedef bool (*dct_func_ptr)( const double*, size_t const, double* );
+    const dct_func_ptr func_ptr = is_forward ? mameJpeg_1D_DCT : mameJpeg_1D_IDCT;
+
+    double* dct_work_buffer = context->info.dct_work_buffer;
+    for( int y = 0; y < 8; y++ )
+    {
+        (*func_ptr)( dct_work_buffer, 1, dct_work_buffer );
+        dct_work_buffer += 8;
+    }
+
+    dct_work_buffer = context->info.dct_work_buffer;
+    for( int y = 0; y < 8; y++ )
+    {
+        (*func_ptr)( dct_work_buffer, 8, dct_work_buffer );
+        ++dct_work_buffer;
+    }
+
+    const double scale_factor = is_forward ? 0.17677669529663687 /* 1. / (4 * sqrt(2)) */
+                                           : 0.125; /* 1. / 8. */
+    if( !is_forward )
+    {
+        context->info.dct_work_buffer[0] /= 1.4142135623730951;
+    }
     for( int i = 0; i < 64; i++ )
     {
-        printf("%8.3f%c", context->info.dct_work_buffer[i] , ( ( i + 1 ) % 8 == 0 ) ? '\n' : ' ' );
-    }
-    printf("\n" );
-#endif
-
-    if( is_forward )
-    {
-        double res1[8][8];
-        for( int y = 0; y < 8; y++ )
-        {
-            for( int x = 0; x < 8; x++ )
-            {
-                uint8_t coeff_index_base = y * 8; 
-                double tmp = context->info.dct_work_buffer[coeff_index_base + 0] * cos( 3.14 / 8 * x * ( 0 + 0.5 ) );
-                tmp += context->info.dct_work_buffer[coeff_index_base + 1] * cos( 3.14 / 8 * x * ( 1 + 0.5 ) );
-                tmp += context->info.dct_work_buffer[coeff_index_base + 2] * cos( 3.14 / 8 * x * ( 2 + 0.5 ) );
-                tmp += context->info.dct_work_buffer[coeff_index_base + 3] * cos( 3.14 / 8 * x * ( 3 + 0.5 ) );
-                tmp += context->info.dct_work_buffer[coeff_index_base + 4] * cos( 3.14 / 8 * x * ( 4 + 0.5 ) );
-                tmp += context->info.dct_work_buffer[coeff_index_base + 5] * cos( 3.14 / 8 * x * ( 5 + 0.5 ) );
-                tmp += context->info.dct_work_buffer[coeff_index_base + 6] * cos( 3.14 / 8 * x * ( 6 + 0.5 ) );
-                tmp += context->info.dct_work_buffer[coeff_index_base + 7] * cos( 3.14 / 8 * x * ( 7 + 0.5 ) );
-                if( x == 0 )
-                {
-                    tmp /= 1.4142;
-                }
-                res1[x][y] = tmp;
-            }
-
-        }
-        for( int y = 0; y < 8; y++ )
-        {
-            for( int x = 0; x < 8; x++ )
-            {
-                uint16_t dst_index = x * 8 + y;
-                double tmp = res1[y][0] * cos( 3.14 / 8 * x * ( 0 + 0.5 ) );
-                tmp += res1[y][1] * cos( 3.14 / 8 * x * ( 1 + 0.5 ) );
-                tmp += res1[y][2] * cos( 3.14 / 8 * x * ( 2 + 0.5 ) );
-                tmp += res1[y][3] * cos( 3.14 / 8 * x * ( 3 + 0.5 ) );
-                tmp += res1[y][4] * cos( 3.14 / 8 * x * ( 4 + 0.5 ) );
-                tmp += res1[y][5] * cos( 3.14 / 8 * x * ( 5 + 0.5 ) );
-                tmp += res1[y][6] * cos( 3.14 / 8 * x * ( 6 + 0.5 ) );
-                tmp += res1[y][7] * cos( 3.14 / 8 * x * ( 7 + 0.5 ) );
-                if( x == 0 )
-                {
-                    tmp /= 1.4142;
-                }
-                tmp /= 4;
-                context->info.dct_work_buffer[ dst_index ] = tmp;
-            }
-        }
-    }
-    else
-    {
-        double res1[8][8];
-        for( int y = 0; y < 8; y++ )
-        {
-            for( int x = 0; x < 8; x++ )
-            {
-                uint8_t coeff_index_base = y * 8; 
-                double tmp = ( 1.0 / 1.4142 ) * context->info.dct_work_buffer[coeff_index_base + 0] * cos( 3.14 / 8 * 0 * ( x + 0.5 ) );
-                tmp += context->info.dct_work_buffer[coeff_index_base + 1] * cos( 3.14 / 8 * 1 * ( x + 0.5 ) );
-                tmp += context->info.dct_work_buffer[coeff_index_base + 2] * cos( 3.14 / 8 * 2 * ( x + 0.5 ) );
-                tmp += context->info.dct_work_buffer[coeff_index_base + 3] * cos( 3.14 / 8 * 3 * ( x + 0.5 ) );
-                tmp += context->info.dct_work_buffer[coeff_index_base + 4] * cos( 3.14 / 8 * 4 * ( x + 0.5 ) );
-                tmp += context->info.dct_work_buffer[coeff_index_base + 5] * cos( 3.14 / 8 * 5 * ( x + 0.5 ) );
-                tmp += context->info.dct_work_buffer[coeff_index_base + 6] * cos( 3.14 / 8 * 6 * ( x + 0.5 ) );
-                tmp += context->info.dct_work_buffer[coeff_index_base + 7] * cos( 3.14 / 8 * 7 * ( x + 0.5 ) );
-
-                res1[x][y] = tmp;
-            }
-        }
-        for( int y = 0; y < 8; y++ )
-        {
-            for( int x = 0; x < 8; x++ )
-            {
-                uint16_t dst_index = x * 8 + y;
-                double tmp = ( 1.0 / 1.4142 ) * res1[y][0] * cos( 3.14 / 8 * 0 * ( x + 0.5 ) );
-                tmp += res1[y][1] * cos( 3.14 / 8 * 1 * ( x + 0.5 ) );
-                tmp += res1[y][2] * cos( 3.14 / 8 * 2 * ( x + 0.5 ) );
-                tmp += res1[y][3] * cos( 3.14 / 8 * 3 * ( x + 0.5 ) );
-                tmp += res1[y][4] * cos( 3.14 / 8 * 4 * ( x + 0.5 ) );
-                tmp += res1[y][5] * cos( 3.14 / 8 * 5 * ( x + 0.5 ) );
-                tmp += res1[y][6] * cos( 3.14 / 8 * 6 * ( x + 0.5 ) );
-                tmp += res1[y][7] * cos( 3.14 / 8 * 7 * ( x + 0.5 ) );
-                tmp /= 4;
-                context->info.dct_work_buffer[ dst_index ] = tmp;
-            }
-        }
+        context->info.dct_work_buffer[i] *= scale_factor;
     }
 
-#if 0
-    for( int i = 0; i < 64; i++ )
-    {
-        printf("%8.3f%c", context->info.dct_work_buffer[i] , ( ( i + 1 ) % 8 == 0 ) ? '\n' : ' ' );
-    }
-    printf("\n" );
-#endif
     return true;
 }
 
@@ -864,7 +935,7 @@ bool mameJpeg_decodeImage( mameJpeg_context* context )
 {
     MAMEJPEG_NULL_CHECK( context );
 
-    size_t dct_buffer_size = 64 * sizeof( mameJpeg_dct_element );
+    size_t dct_buffer_size = 64 * sizeof( double );
     MAMEJPEG_CHECK( mameJpeg_assignBuffer( context, dct_buffer_size, (void**)&context->info.dct_work_buffer ) );
 
     size_t mcu_buffer_size = mameJpeg_getMCUBufferSize( context->info.width,
@@ -1196,7 +1267,7 @@ bool mameJpeg_getDecodeBufferSize( mameJpeg_stream_read_callback_ptr read_callba
         }
     }
 
-    size_t dct_buffer_size = 64 * sizeof( mameJpeg_dct_element );
+    size_t dct_buffer_size = 64 * sizeof( double );
     size_t mcu_buffer_size = mameJpeg_getMCUBufferSize( context->info.width,
             context->info.component_num,
             context->info.component[0].hor_sampling,
@@ -1657,7 +1728,7 @@ bool mameJpeg_encodeImage( mameJpeg_context* context )
 {
     MAMEJPEG_NULL_CHECK( context );
 
-    size_t dct_buffer_size = 64 * sizeof( mameJpeg_dct_element );
+    size_t dct_buffer_size = 64 * sizeof( double );
     MAMEJPEG_CHECK( mameJpeg_assignBuffer( context, dct_buffer_size, (void**)&context->info.dct_work_buffer ) );
 
     size_t mcu_buffer_size = mameJpeg_getMCUBufferSize( context->info.width,
@@ -1879,7 +1950,7 @@ bool mameJpeg_getEncodeBufferSize( size_t width, size_t height, mameJpeg_format 
     uint8_t luma_hor_sampling = mameJpeg_getLumaHorSampling( format );
     uint8_t luma_ver_sampling = mameJpeg_getLumaVerSampling( format );
 
-    size_t dct_buffer_size = 64 * sizeof( mameJpeg_dct_element );
+    size_t dct_buffer_size = 64 * sizeof( double );
     size_t mcu_buffer_size = mameJpeg_getMCUBufferSize( width,
             component_num,
             luma_hor_sampling,
